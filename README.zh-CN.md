@@ -1,5 +1,8 @@
 # harbor
 
+[![CI](https://github.com/summertools/harbor/actions/workflows/ci.yml/badge.svg)](https://github.com/summertools/harbor/actions/workflows/ci.yml)
+
+
 **安全、优雅的 GitHub Release 二进制安装器。**
 
 [English](README.md) | 简体中文
