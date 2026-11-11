@@ -1,0 +1,47 @@
+[package]
+name = "harbor"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+description = "A safe, interactive installer for GitHub release binaries"
+license = "MIT"
+repository = "https://github.com/summertools/harbor"
+keywords = ["github", "release", "installer", "cli", "tui"]
+categories = ["command-line-utilities", "development-tools"]
+
+[lib]
+name = "harbor"
+path = "src/lib.rs"
+
+[[bin]]
+name = "harbor"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4.6", features = ["derive", "env"] }
+flate2 = "1.1"
+globset = "0.4"
+hex = "0.4"
+ratatui = "0.30"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.10"
+tar = "0.4"
+tempfile = "3.20"
+thiserror = "2.0"
+toml = "0.8"
+unicode-width = "0.2"
+url = "2.5"
+zip = { version = "9.0", default-features = false, features = ["deflate"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+tempfile = "3.20"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
