@@ -61,6 +61,10 @@ cargo install --path .
 
 要求 Rust 1.88 或更高版本。生成的可执行文件名为 `harbor`。
 
+每个 [Release](https://github.com/summertools/harbor/releases) 还提供 Linux
+（x86_64、aarch64）、macOS（Intel、Apple 芯片）和 Windows（x86_64）预编译包，
+并附带 SHA-256 校验文件；解压前请先校验。
+
 ## 快速开始
 
 ```bash
