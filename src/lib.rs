@@ -24,6 +24,8 @@ pub mod output;
 pub mod platform;
 pub mod release;
 pub mod ui;
+pub mod update;
+pub mod version;
 
 pub use config::{Config, Source, SourceKind};
 pub use error::{Error, Result};

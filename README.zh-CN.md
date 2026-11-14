@@ -43,6 +43,8 @@ CPU 架构的包，校验 SHA-256，在不信任压缩包路径的前提下安�
   `! 文件缺失`、`! 无兼容资产` 或 `○ 未安装`；顶部统计已安装、可更新和未安装数量。
   外部文件必须使用 `--force` 或 UI 中的显式覆盖开关。
 - **精致的 ratatui 界面**：搜索、源过滤、资产选择、实时进度、确认页和源管理器。
+- **可选自动更新**：只更新受管理安装，严格使用 SemVer、平台兼容资产和强制
+  SHA-256 校验；默认关闭，可在 TUI 和 `harbor autoupdate`（适合定时任务）中使用。
 - **可脚本化 CLI**：JSON 输出、dry-run、指定 tag、资产 glob、压缩包内二进制选择、
   非交互 `--yes`。
 - **不执行 shell**、不自动 `sudo`、不自动修改 PATH、不启动后台服务。
@@ -158,6 +160,7 @@ harbor [--config FILE] [--bin-dir DIR] [--no-color] [--quiet] [--json] [COMMAND]
 | `harbor releases <repo> [--tag T] [--limit N]` | 列出 Release 和兼容资产 |
 | `harbor install <repo>` | 解析、校验并安装 |
 | `harbor update` | 根据安装清单更新 |
+| `harbor autoupdate [--check]` | 应用配置启用的自动更新；`--check` 只报告 |
 | `harbor search <query>` | 搜索已配置仓库 |
 | `harbor source add\|list\|remove` | 管理源 |
 | `harbor doctor` | 检查路径、权限、token 和 API 连通性 |
@@ -206,6 +209,7 @@ stderr。`list`、`status`、`releases`、`source list` 和 `doctor` 也支持 `
 bin_dir = "~/.local/bin"
 allow_unverified = false
 include_prereleases = false
+auto_update = false
 max_download_mb = 512
 
 [[sources]]
@@ -221,6 +225,7 @@ name = "BurntSushi/ripgrep"
 - `allow_unverified = true` 相当于持久化的 `--allow-unverified`。除非信任来源，
   否则不要开启。
 - `include_prereleases = true` 允许在没有稳定版时回退到预发布版。
+- `auto_update = true` 开启下文的受管理安装自动更新策略，默认关闭。
 - `max_download_mb` 限制单个资产下载大小（1–4096 MiB）。
 - 源最多 64 个。加载时无效或重复的源会被忽略并给出警告。
 
@@ -306,6 +311,45 @@ harbor update --yes
 
 对每个清单条目获取最新稳定版。版本和已安装摘要都匹配时跳过；受管理文件丢失时
 重新安装；文件被外部修改时停止并提示使用 `--force`，不会静默覆盖。
+
+## 自动更新
+
+自动更新默认**关闭**，在配置中开启：
+
+```toml
+auto_update = true
+```
+
+开启后，harbor 会按照统一安全策略自动更新受管理安装，触发方式有两种：
+
+- 打开交互界面并完成已安装仓库的最新版本信息获取后自动执行；
+- 运行 `harbor autoupdate`，适合放入 cron 或 systemd timer。
+
+```bash
+harbor autoupdate --check      # 只检查，不下载；配置关闭时也可用
+harbor autoupdate              # 配置开启时应用待更新项
+harbor autoupdate --json       # 机器可读报告
+```
+
+任何更新或元数据获取失败时，`autoupdate` 会以非零状态退出，便于定时任务告警。
+
+自动更新比手动更新更严格：
+
+- 只处理安装清单里的仓库；
+- 记录的可执行文件必须仍然存在；
+- 两个 tag 都必须是合法 SemVer，且最新 tag 必须严格更新；不会自动降级，
+  也不会猜测无法解析的版本号；
+- 不会使用草稿 Release；只有开启 `include_prereleases = true` 才会使用预发布版；
+- 最新 Release 必须有当前平台兼容资产；
+- Release 必须提供 SHA-256 校验和。**自动更新不会受 `allow_unverified` 影响，
+  也绝不会安装未校验资产**；
+- 不会替换被外部修改或未受管理的文件；
+- 会跳过当前正在运行的 harbor 可执行文件；
+- 单个仓库失败会按路径报告，并继续处理其他仓库。
+
+交互界面会在底部显示自动更新进度，结束后汇总更新、失败和跳过的数量。自动更新
+进行中按 `q` 会清空剩余队列，并在当前这个更新完成后退出，避免在原子替换写入过程
+中被打断。
 
 ## 作为库使用
 

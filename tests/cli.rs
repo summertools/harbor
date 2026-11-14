@@ -216,6 +216,87 @@ fn relative_config_paths_are_supported() {
 }
 
 #[test]
+fn autoupdate_respects_the_config_flag_without_network() {
+    let temp = temp_env();
+    let config = temp.path().join("harbor.toml");
+    let output = run(
+        temp.path(),
+        &["autoupdate", "--config", config.to_str().unwrap()],
+    );
+    assert!(output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("auto-update is disabled"),
+        "stdout: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+
+    let json = run(
+        temp.path(),
+        &["autoupdate", "--config", config.to_str().unwrap(), "--json"],
+    );
+    assert!(json.status.success());
+    let value: serde_json::Value = serde_json::from_slice(&json.stdout).unwrap();
+    assert_eq!(value["enabled"], false);
+}
+
+#[test]
+fn autoupdate_check_with_an_empty_ledger_is_offline_safe() {
+    let temp = temp_env();
+    let output = run(temp.path(), &["autoupdate", "--check"]);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("no managed installs"));
+}
+
+#[test]
+fn autoupdate_reports_a_malformed_ledger_entry_without_network() {
+    let temp = temp_env();
+    let bin_dir = temp.path().join("bin");
+    fs::create_dir_all(&bin_dir).unwrap();
+    let binary = bin_dir.join("tool");
+    fs::write(&binary, "binary").unwrap();
+    let state_dir = temp.path().join("state").join("harbor");
+    fs::create_dir_all(&state_dir).unwrap();
+    let ledger = serde_json::json!({
+        "entries": {
+            binary.display().to_string(): {
+                "repo": "not a repository",
+                "version": "v1.0.0",
+                "asset": "tool.tar.gz",
+                "asset_sha256": "a".repeat(64),
+                "binary_sha256": "b".repeat(64),
+                "installed_at": 1_700_000_000_u64,
+                "bin_dir": bin_dir.display().to_string(),
+            }
+        }
+    });
+    fs::write(
+        state_dir.join("installs.json"),
+        serde_json::to_vec_pretty(&ledger).unwrap(),
+    )
+    .unwrap();
+
+    let output = run(temp.path(), &["autoupdate", "--check", "--json"]);
+    assert!(!output.status.success());
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["checked"], 1);
+    assert_eq!(json["failed"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        json["failed"][0]["path"].as_str().unwrap(),
+        binary.display().to_string()
+    );
+    assert!(
+        json["failed"][0]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("invalid repository name")
+    );
+}
+
+#[test]
 fn status_offline_reports_installed_versions() {
     let temp = temp_env();
     let bin_dir = temp.path().join("bin");

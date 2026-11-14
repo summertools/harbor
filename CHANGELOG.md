@@ -21,6 +21,12 @@ All notable changes to this project are documented here. The format follows
   `harbor list` output.
 - Synthetic repository rows for ledger installs whose source is no longer
   configured, keeping all managed binaries visible and updateable.
+- Opt-in automatic updates via `auto_update = true`: safe SemVer upgrades only,
+  compatible assets, mandatory SHA-256 verification, and no unmanaged-file
+  replacement. Install-lock ledger revalidation prevents concurrent runs from
+  overwriting or downgrading a newer install. The UI shows progress in the
+  footer; `harbor autoupdate` supports cron/timer usage and
+  `--check`/`--json` reporting.
 
 ### Fixed
 

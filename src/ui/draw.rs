@@ -165,7 +165,7 @@ fn draw_header(frame: &mut Frame, state: &UiState, area: Rect, theme: Theme) {
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(1), Constraint::Length(1)])
         .split(inner);
-    let right_width = 40u16.min(inner.width / 2);
+    let right_width = 44u16.min(inner.width / 2);
     let top = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Min(0), Constraint::Length(right_width)])
@@ -217,15 +217,17 @@ fn draw_header(frame: &mut Frame, state: &UiState, area: Rect, theme: Theme) {
         bottom[0],
     );
     let (installed, updates, available) = state.status_counts();
+    let counters = format!(
+        "{} installed · {} update{} · {} not installed",
+        installed,
+        updates,
+        if updates == 1 { "" } else { "s" },
+        available
+    );
+    let counters = format::truncate(&counters, usize::from(right_width));
     frame.render_widget(
         Paragraph::new(Line::from(vec![Span::styled(
-            format!(
-                "{} installed · {} update{} · {} not installed",
-                installed,
-                updates,
-                if updates == 1 { "" } else { "s" },
-                available
-            ),
+            counters.into_owned(),
             if updates > 0 {
                 theme.warn()
             } else {
@@ -924,6 +926,8 @@ fn draw_footer(frame: &mut Frame, state: &UiState, area: Rect, theme: Theme) {
             Span::styled(format::sanitize(&state.search_buffer), theme.bold()),
             Span::styled("_", theme.accent()),
         ])
+    } else if let Some(activity) = state.auto_activity_line() {
+        Line::from(Span::styled(format::sanitize(&activity), theme.accent()))
     } else if let Some(status) = &state.status {
         let style = match status.level {
             StatusLevel::Info => theme.accent(),
@@ -953,6 +957,14 @@ fn draw_footer(frame: &mut Frame, state: &UiState, area: Rect, theme: Theme) {
                     format!("filter {:?}", state.search_query)
                 },
                 theme.dim(),
+            ),
+            Span::styled(
+                if state.config.auto_update {
+                    "   auto-update on"
+                } else {
+                    ""
+                },
+                theme.good(),
             ),
         ])
     };
@@ -1586,6 +1598,7 @@ mod tests {
                 name: None,
                 force: false,
                 allow_unverified: false,
+                expected_current: None,
             },
             release(),
             AssetChoice {
@@ -1729,6 +1742,7 @@ mod tests {
                 name: None,
                 force: false,
                 allow_unverified: false,
+                expected_current: None,
             },
             release(),
             AssetChoice {

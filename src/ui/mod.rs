@@ -2,7 +2,7 @@
 
 mod draw;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
@@ -22,6 +22,7 @@ use ratatui::widgets::ListState;
 use crate::Harbor;
 use crate::config::{Config, Source};
 use crate::error::{Error, Result};
+use crate::format;
 use crate::github::{GitHubClient, Release, RepoRef};
 use crate::install::{
     self, InstallOutcome, InstallPlan, InstallRequest, InstallStage, InstalledPackage, Installer,
@@ -29,6 +30,7 @@ use crate::install::{
 };
 use crate::platform::{BinDir, Platform};
 use crate::release::{self, AssetChoice};
+use crate::update::AutoUpdatePlan;
 
 /// Options passed from the CLI.
 #[derive(Clone, Debug)]
@@ -149,6 +151,7 @@ enum Command {
     Install {
         plan: Box<InstallPlan>,
         config: Config,
+        auto: bool,
     },
 }
 
@@ -159,9 +162,13 @@ enum WorkerEvent {
         result: std::result::Result<Release, String>,
         no_release: bool,
     },
-    Progress(ProgressEvent),
+    Progress {
+        event: ProgressEvent,
+        auto: bool,
+    },
     Installed {
         result: std::result::Result<InstallOutcome, String>,
+        auto: bool,
     },
 }
 
@@ -209,7 +216,7 @@ impl Worker {
                                 break;
                             }
                         }
-                        Command::Install { plan, config } => {
+                        Command::Install { plan, config, auto } => {
                             let bin_dir = BinDir {
                                 path: plan.bin_dir.clone(),
                                 in_path: plan.in_path,
@@ -217,10 +224,13 @@ impl Worker {
                             let installer = Installer::new(&client, &config, bin_dir);
                             let result = installer
                                 .install(&plan, |event| {
-                                    let _ = event_tx.send(WorkerEvent::Progress(event));
+                                    let _ = event_tx.send(WorkerEvent::Progress { event, auto });
                                 })
                                 .map_err(|error| error.to_string());
-                            if event_tx.send(WorkerEvent::Installed { result }).is_err() {
+                            if event_tx
+                                .send(WorkerEvent::Installed { result, auto })
+                                .is_err()
+                            {
                                 break;
                             }
                         }
@@ -280,6 +290,13 @@ impl StatusFilter {
 pub(crate) enum ReleaseErrorKind {
     NoRelease,
     Unavailable,
+}
+
+pub(crate) struct AutoUpdateActivity {
+    pub plan: AutoUpdatePlan,
+    pub stage: InstallStage,
+    pub current: u64,
+    pub total: Option<u64>,
 }
 
 #[derive(Clone, Debug)]
@@ -395,6 +412,14 @@ pub(crate) struct UiState {
     latest_errors: HashMap<String, ReleaseError>,
     status_inflight: HashSet<String>,
     pub status_filter: StatusFilter,
+    auto_queue: VecDeque<AutoUpdatePlan>,
+    auto_active: Option<AutoUpdateActivity>,
+    auto_attempted: HashSet<String>,
+    auto_scan_done: bool,
+    auto_updated: usize,
+    auto_failed: usize,
+    auto_skipped: usize,
+    quit_after_auto: bool,
     pub last_selection_change: Instant,
     pub search_query: String,
     pub search_buffer: String,
@@ -440,6 +465,14 @@ impl UiState {
             latest_errors: HashMap::new(),
             status_inflight: HashSet::new(),
             status_filter: StatusFilter::All,
+            auto_queue: VecDeque::new(),
+            auto_active: None,
+            auto_attempted: HashSet::new(),
+            auto_scan_done: false,
+            auto_updated: 0,
+            auto_failed: 0,
+            auto_skipped: 0,
+            quit_after_auto: false,
             last_selection_change: Instant::now(),
             search_query: String::new(),
             search_buffer: String::new(),
@@ -619,6 +652,32 @@ impl UiState {
             .map_or_else(|| "all sources".to_owned(), Source::label)
     }
 
+    fn auto_activity_line(&self) -> Option<String> {
+        let activity = self.auto_active.as_ref()?;
+        let progress = match activity.total.filter(|total| *total > 0) {
+            Some(total) => format!(
+                "  {:.0}%  {}/{}",
+                (activity.current as f64 / total as f64).clamp(0.0, 1.0) * 100.0,
+                format::bytes(activity.current),
+                format::bytes(total)
+            ),
+            None => String::new(),
+        };
+        Some(format!(
+            "auto-update {} {} → {} · {}{}{}",
+            activity.plan.package.repo,
+            activity.plan.from_version(),
+            activity.plan.to_version(),
+            activity.stage.label(),
+            progress,
+            if self.quit_after_auto {
+                " · quitting after this update"
+            } else {
+                ""
+            }
+        ))
+    }
+
     fn refresh_installed(&mut self) {
         self.installed = installed_packages(&self.ledger);
         self.installed_by_repo = self
@@ -745,6 +804,7 @@ impl App {
         }
         self.schedule_release(now);
         self.schedule_status_prefetch();
+        self.schedule_auto_updates();
     }
 
     fn poll_worker(&mut self) {
@@ -807,21 +867,31 @@ impl App {
                     }
                     self.state.rebuild_filter();
                 }
-                WorkerEvent::Progress(event) => {
-                    if let Stage::Progress(progress) = &mut self.state.stage {
+                WorkerEvent::Progress { event, auto } => {
+                    if auto {
+                        if let Some(activity) = &mut self.state.auto_active {
+                            activity.stage = event.stage;
+                            activity.current = event.current;
+                            activity.total = event.total;
+                        }
+                    } else if let Stage::Progress(progress) = &mut self.state.stage {
                         progress.stage = event.stage;
                         progress.current = event.current;
                         progress.total = event.total;
                     }
                 }
-                WorkerEvent::Installed { result } => {
+                WorkerEvent::Installed { result, auto } => {
                     if result.is_ok() {
                         self.state.reload_ledger();
                         self.state.merge_ledger_repos();
                         self.state.rebuild_filter();
                     }
-                    self.state.status = None;
-                    self.state.stage = Stage::Outcome(OutcomeState { result });
+                    if auto {
+                        self.finish_auto_update(result);
+                    } else {
+                        self.state.status = None;
+                        self.state.stage = Stage::Outcome(OutcomeState { result });
+                    }
                 }
             }
         }
@@ -917,12 +987,212 @@ impl App {
         }
     }
 
+    fn schedule_auto_updates(&mut self) {
+        if !self.state.config.auto_update {
+            return;
+        }
+        if self.state.auto_active.is_some() {
+            return;
+        }
+        if !self.state.auto_queue.is_empty() {
+            self.start_next_auto_update();
+            return;
+        }
+        if self.state.auto_scan_done {
+            return;
+        }
+        if !matches!(self.state.stage, Stage::Browse)
+            || self.state.loading_repos
+            || self.state.release_loading
+            || !self.state.status_inflight.is_empty()
+        {
+            return;
+        }
+        self.prepare_auto_updates();
+    }
+
+    fn prepare_auto_updates(&mut self) {
+        // Wait until every managed repository has either latest-release
+        // metadata or a recorded fetch error. Marking the scan done while a
+        // request is still in flight would silently skip that package until
+        // the next manual refresh.
+        let ready = self.state.installed.iter().all(|package| {
+            let key = package.repo.to_ascii_lowercase();
+            self.state.latest.contains_key(&key) || self.state.latest_errors.contains_key(&key)
+        });
+        if !ready {
+            return;
+        }
+        self.state.auto_scan_done = true;
+        let checksum_config = crate::update::checksum_only_config(self.state.config.clone());
+        let platform = self.state.platform;
+        let packages = install::ledger_packages(&self.state.ledger);
+        let mut skipped = Vec::new();
+        let mut queued = 0usize;
+        for package in packages {
+            // The UI groups ledger rows by repository, but auto-update must
+            // visit every recorded executable, including secondary binaries
+            // installed from the same release. Latest-release metadata is
+            // cached per repository; the attempt guard is per executable.
+            let repo_key = package.repo.to_ascii_lowercase();
+            let attempt_key = package.path.display().to_string();
+            if self.state.auto_attempted.contains(&attempt_key) {
+                continue;
+            }
+            let latest = self
+                .state
+                .latest
+                .get(&repo_key)
+                .map(|info| info.release.clone());
+            let Some(release) = latest else {
+                self.state.auto_attempted.insert(attempt_key);
+                skipped.push(format!("{}: latest release unavailable", package.repo));
+                continue;
+            };
+            self.state.auto_attempted.insert(attempt_key);
+            match crate::update::decide(&checksum_config, platform, &package, &release) {
+                crate::update::Decision::Update(plan) if queued < 32 => {
+                    self.state.auto_queue.push_back(*plan);
+                    queued += 1;
+                }
+                crate::update::Decision::Update(_) => {
+                    skipped.push(format!("{}: auto-update queue limit reached", package.repo));
+                }
+                crate::update::Decision::Current => {}
+                crate::update::Decision::Skip { reason } => {
+                    skipped.push(format!("{}: {reason}", package.repo));
+                }
+            }
+        }
+        self.state.auto_skipped = skipped.len();
+        if queued > 0 {
+            self.start_next_auto_update();
+        } else if let Some(first) = skipped.first() {
+            self.state.status = Some(Status {
+                text: if skipped.len() == 1 {
+                    format!("auto-update skipped: {first}")
+                } else {
+                    format!("auto-update skipped {} package(s): {first}", skipped.len())
+                },
+                level: StatusLevel::Warning,
+            });
+        }
+    }
+
+    fn start_next_auto_update(&mut self) {
+        if self.state.auto_active.is_some() {
+            return;
+        }
+        let Some(plan) = self.state.auto_queue.pop_front() else {
+            if self.state.quit_after_auto {
+                self.quit = true;
+            }
+            return;
+        };
+        let message = format!(
+            "auto-updating {} {} → {}",
+            plan.package.repo,
+            plan.from_version(),
+            plan.to_version()
+        );
+        let command = Command::Install {
+            plan: Box::new(plan.plan.clone()),
+            config: crate::update::checksum_only_config(self.state.config.clone()),
+            auto: true,
+        };
+        if self.worker.send(command) {
+            self.state.auto_active = Some(AutoUpdateActivity {
+                plan,
+                stage: InstallStage::Downloading,
+                current: 0,
+                total: None,
+            });
+            self.state.status = Some(Status {
+                text: message,
+                level: StatusLevel::Info,
+            });
+        } else {
+            self.state.status = Some(Status {
+                text: "network worker stopped during auto-update".to_owned(),
+                level: StatusLevel::Error,
+            });
+            self.state.auto_queue.clear();
+            self.state.quit_after_auto = false;
+        }
+    }
+
+    fn finish_auto_update(&mut self, result: std::result::Result<InstallOutcome, String>) {
+        let activity = self.state.auto_active.take();
+        if let Some(activity) = activity {
+            match result {
+                Ok(outcome) => {
+                    self.state.auto_updated += 1;
+                    self.state.status = Some(Status {
+                        text: if outcome.already_current {
+                            format!(
+                                "auto-update: {} is already current at {}",
+                                outcome.repo, outcome.version
+                            )
+                        } else {
+                            format!(
+                                "auto-updated {} {} → {}",
+                                outcome.repo,
+                                activity.plan.from_version(),
+                                outcome.version
+                            )
+                        },
+                        level: StatusLevel::Success,
+                    });
+                }
+                Err(error) => {
+                    self.state.auto_failed += 1;
+                    self.state.status = Some(Status {
+                        text: format!(
+                            "auto-update failed for {}: {}",
+                            activity.plan.package.repo,
+                            format::sanitize(&error)
+                        ),
+                        level: StatusLevel::Warning,
+                    });
+                }
+            }
+        }
+        self.start_next_auto_update();
+        if self.state.auto_active.is_none() && self.state.auto_queue.is_empty() {
+            let total = self.state.auto_updated + self.state.auto_failed + self.state.auto_skipped;
+            if total > 0 {
+                self.state.status = Some(Status {
+                    text: format!(
+                        "auto-update complete: {} updated · {} failed · {} skipped",
+                        self.state.auto_updated, self.state.auto_failed, self.state.auto_skipped
+                    ),
+                    level: if self.state.auto_failed > 0 {
+                        StatusLevel::Warning
+                    } else {
+                        StatusLevel::Success
+                    },
+                });
+            }
+            if self.state.quit_after_auto {
+                self.quit = true;
+            }
+        }
+    }
+
     fn refresh(&mut self) {
         self.state.clear_release();
         self.state.warnings.clear();
         self.state.status = None;
         self.state.latest.clear();
         self.state.latest_errors.clear();
+        self.state.auto_queue.clear();
+        self.state.auto_active = None;
+        self.state.auto_attempted.clear();
+        self.state.auto_scan_done = false;
+        self.state.auto_updated = 0;
+        self.state.auto_failed = 0;
+        self.state.auto_skipped = 0;
+        self.state.quit_after_auto = false;
         self.state.reload_ledger();
         self.start();
     }
@@ -931,7 +1201,16 @@ impl App {
         if key.modifiers.contains(KeyModifiers::CONTROL)
             && matches!(key.code, KeyCode::Char('c') | KeyCode::Char('C'))
         {
-            self.quit = true;
+            if self.state.auto_active.is_some() {
+                self.state.quit_after_auto = true;
+                self.state.auto_queue.clear();
+                self.state.status = Some(Status {
+                    text: "auto-update is running; harbor will quit after this update".to_owned(),
+                    level: StatusLevel::Warning,
+                });
+            } else {
+                self.quit = true;
+            }
             return;
         }
         if self.state.search_active {
@@ -973,6 +1252,7 @@ impl App {
                         let command = Command::Install {
                             plan: Box::new(plan.clone()),
                             config: self.state.config.clone(),
+                            auto: false,
                         };
                         if self.worker.send(command) {
                             self.state.stage = Stage::Progress(ProgressState {
@@ -1032,7 +1312,19 @@ impl App {
 
     fn handle_browse(&mut self, key: KeyEvent) {
         match key.code {
-            KeyCode::Char('q') => self.quit = true,
+            KeyCode::Char('q') => {
+                if self.state.auto_active.is_some() {
+                    self.state.quit_after_auto = true;
+                    self.state.auto_queue.clear();
+                    self.state.status = Some(Status {
+                        text: "auto-update is running; harbor will quit after this update"
+                            .to_owned(),
+                        level: StatusLevel::Warning,
+                    });
+                } else {
+                    self.quit = true;
+                }
+            }
             KeyCode::Char('?') => self.state.stage = Stage::Help,
             KeyCode::Char('s') => {
                 self.state.source_state.selected = 0;
@@ -1041,7 +1333,16 @@ impl App {
                 self.state.source_state.status = None;
                 self.state.stage = Stage::Sources(self.state.source_state.clone());
             }
-            KeyCode::Char('r') => self.refresh(),
+            KeyCode::Char('r') => {
+                if self.state.auto_active.is_some() {
+                    self.state.status = Some(Status {
+                        text: "auto-update is running; wait before refreshing".to_owned(),
+                        level: StatusLevel::Warning,
+                    });
+                } else {
+                    self.refresh();
+                }
+            }
             KeyCode::Char('/') => {
                 self.state.search_buffer = self.state.search_query.clone();
                 self.state.search_active = true;
@@ -1159,6 +1460,13 @@ impl App {
     }
 
     fn confirm_install(&mut self) {
+        if self.state.auto_active.is_some() {
+            self.state.status = Some(Status {
+                text: "auto-update is running; wait for it to finish".to_owned(),
+                level: StatusLevel::Warning,
+            });
+            return;
+        }
         if let Some(error) = &self.state.ledger_error {
             self.state.status = Some(Status {
                 text: format!("install ledger is unavailable: {error}"),
@@ -1197,6 +1505,7 @@ impl App {
             name: None,
             force: false,
             allow_unverified: false,
+            expected_current: None,
         };
         match install::build_plan(
             &self.state.config,

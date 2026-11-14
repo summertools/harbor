@@ -113,6 +113,9 @@ pub struct Config {
     pub allow_unverified: bool,
     /// Consider prerelease tags when a repository has no stable release.
     pub include_prereleases: bool,
+    /// Automatically update managed installs when a newer, compatible,
+    /// checksum-verified release is available. Off by default.
+    pub auto_update: bool,
     /// Safety cap for one downloaded asset.
     #[serde(default = "default_max_download_mb")]
     pub max_download_mb: u64,
@@ -135,6 +138,7 @@ impl Default for Config {
             bin_dir: None,
             allow_unverified: false,
             include_prereleases: false,
+            auto_update: false,
             max_download_mb: default_max_download_mb(),
             sources: default_sources(),
         }
@@ -476,9 +480,10 @@ mod tests {
     }
 
     #[test]
-    fn default_config_targets_summertools() {
+    fn default_config_targets_summertools_and_disables_auto_update() {
         let config = Config::default();
         assert_eq!(config.sources, vec![Source::org("summertools").unwrap()]);
+        assert!(!config.auto_update);
     }
 
     #[test]

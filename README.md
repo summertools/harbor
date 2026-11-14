@@ -49,6 +49,9 @@ the scriptable CLI.
   counts. Unmanaged files require `--force` or the explicit overwrite toggle.
 - **Polished ratatui interface** with search, source filters, asset selection,
   live progress, confirmations, and a source manager.
+- **Opt-in automatic updates** for managed installs, with strict SemVer,
+  platform compatibility, and mandatory SHA-256 checks. Disabled by default;
+  available in the TUI and as `harbor autoupdate` for schedulers.
 - **Scriptable CLI** with JSON output, dry runs, explicit tags, asset globs,
   archive-internal binary selection, and non-interactive `--yes`.
 - **No shell execution**, no automatic `sudo`, no automatic PATH edits, and no
@@ -169,6 +172,7 @@ harbor [--config FILE] [--bin-dir DIR] [--no-color] [--quiet] [--json] [COMMAND]
 | `harbor releases <repo> [--tag T] [--limit N]` | List releases and compatible assets |
 | `harbor install <repo>` | Resolve, verify, and install |
 | `harbor update` | Update managed installs from the ledger |
+| `harbor autoupdate [--check]` | Apply config-enabled automatic updates; `--check` reports only |
 | `harbor search <query>` | Search configured repositories |
 | `harbor source add\|list\|remove` | Manage sources |
 | `harbor doctor` | Check paths, permissions, token, and API connectivity |
@@ -218,6 +222,7 @@ are also supported. Default sources are used when the file does not exist yet.
 bin_dir = "~/.local/bin"
 allow_unverified = false
 include_prereleases = false
+auto_update = false
 max_download_mb = 512
 
 [[sources]]
@@ -234,6 +239,8 @@ name = "BurntSushi/ripgrep"
   Leave it off unless you trust the source.
 - `include_prereleases = true` lets the latest endpoint fall back to a
   prerelease when no stable release exists.
+- `auto_update = true` enables the managed-install auto-update policy described
+  below. It is off by default.
 - `max_download_mb` caps each downloaded asset (1–4096 MiB).
 - Sources are limited to 64 entries. Invalid or duplicate sources are ignored
   with a warning when loading.
@@ -334,6 +341,52 @@ For each ledger entry Harbor fetches the latest stable release. It skips the
 entry when the version and installed digest still match. If the managed file is
 missing, it is reinstalled. If the file was modified outside Harbor, the update
 stops and asks for `--force` rather than silently replacing it.
+
+## Automatic updates
+
+Automatic updates are **off by default**. Enable them in the config:
+
+```toml
+auto_update = true
+```
+
+With this enabled, Harbor automatically applies safe updates for managed
+installs. Two triggers use the same policy:
+
+- when the interactive UI starts and finishes fetching latest metadata for
+  installed repositories;
+- when `harbor autoupdate` is invoked, which is suitable for a cron job or
+  systemd timer.
+
+```bash
+harbor autoupdate --check      # report only, works even when disabled
+harbor autoupdate              # apply pending updates if enabled
+harbor autoupdate --json       # machine-readable report
+```
+
+`autoupdate` exits non-zero when any update or metadata fetch fails, so a timer
+or cron wrapper can alert on it.
+
+Auto-update is intentionally stricter than a manual update:
+
+- only repositories recorded in the install ledger are considered;
+- the recorded executable must still exist;
+- both tags must be valid SemVer and the latest tag must be strictly newer
+  (Harbor never auto-downgrades or guesses at non-SemVer tags);
+- draft releases are never used, and prereleases are only used when
+  `include_prereleases = true`;
+- the latest release must have a compatible asset for this platform;
+- the release must publish a SHA-256 checksum. **Auto-update ignores
+  `allow_unverified` and never installs an unverified asset**;
+- a modified or unmanaged target file is never replaced;
+- the currently running Harbor executable is skipped;
+- failures are reported per repository and do not abort the remaining updates.
+
+The interactive UI shows auto-update progress in the footer and reports the
+final number of updated, failed, and skipped packages. Pressing `q` while an
+auto-update is running clears the remaining queue and asks Harbor to quit after
+the current update finishes, so an atomic file replacement is never interrupted
+mid-write.
 
 ## Library usage
 

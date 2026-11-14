@@ -68,6 +68,10 @@ pub struct InstallRequest {
     pub name: Option<String>,
     pub force: bool,
     pub allow_unverified: bool,
+    /// Auto-update only: the ledger version this plan was prepared from.
+    /// The installer re-checks it under the install lock so a concurrent
+    /// update can never be overwritten or downgraded.
+    pub expected_current: Option<String>,
 }
 
 /// A fully resolved installation that can be shown for confirmation or used
@@ -302,6 +306,7 @@ impl<'a> Installer<'a> {
         let _lock = InstallLock::acquire(&bin_dir)?;
         let mut ledger = Ledger::load()?;
         let key = ledger_key(&target);
+        ensure_expected_current(&plan.request, &ledger, &key, &target)?;
         let mut already_current = false;
         let mut replace_allowed = plan.request.force;
         if let Ok(metadata) = fs::symlink_metadata(&target) {
@@ -327,6 +332,19 @@ impl<'a> Installer<'a> {
 
         let mut warning = plan.warning.clone();
         if already_current {
+            // The binary content already matches this release. Refresh any
+            // existing ledger metadata so a previously stale version does not
+            // keep advertising an update forever. Never claim ownership of an
+            // unmanaged file.
+            if let Some(entry) = ledger.entries.get_mut(&key) {
+                entry.repo = plan.request.repo.full_name();
+                entry.version = plan.release.tag_name.clone();
+                entry.asset = plan.choice.asset.name.clone();
+                entry.asset_sha256 = downloaded.sha256.clone();
+                entry.binary_sha256 = binary_sha256.clone();
+                entry.bin_dir = bin_dir.display().to_string();
+                ledger.save()?;
+            }
             let outcome_warning = warning.take();
             return Ok(InstallOutcome {
                 path: target,
@@ -648,6 +666,38 @@ pub fn installed_packages(ledger: &Ledger) -> Vec<InstalledPackage> {
     packages
 }
 
+/// Return one package per managed executable instead of grouping by repository.
+/// Update paths use this so every recorded binary is refreshed, even when one
+/// repository installed several binaries.
+#[must_use]
+pub fn ledger_packages(ledger: &Ledger) -> Vec<InstalledPackage> {
+    let mut packages: Vec<_> = ledger
+        .entries
+        .iter()
+        .map(|(path, entry)| {
+            let path = PathBuf::from(path);
+            let present = fs::symlink_metadata(&path)
+                .is_ok_and(|metadata| metadata.is_file() && !metadata.file_type().is_symlink());
+            InstalledPackage {
+                repo: entry.repo.clone(),
+                version: entry.version.clone(),
+                path,
+                bin_dir: PathBuf::from(&entry.bin_dir),
+                installed_at: entry.installed_at,
+                binaries: 1,
+                present,
+            }
+        })
+        .collect();
+    packages.sort_by(|left, right| {
+        left.repo
+            .to_ascii_lowercase()
+            .cmp(&right.repo.to_ascii_lowercase())
+            .then_with(|| left.path.cmp(&right.path))
+    });
+    packages
+}
+
 impl Ledger {
     pub fn load() -> Result<Self> {
         Self::load_from(&Self::default_path())
@@ -725,6 +775,35 @@ impl Ledger {
     #[must_use]
     pub fn get(&self, path: &Path) -> Option<&LedgerEntry> {
         self.entries.get(&ledger_key(path))
+    }
+}
+
+fn ensure_expected_current(
+    request: &InstallRequest,
+    ledger: &Ledger,
+    key: &str,
+    target: &Path,
+) -> Result<()> {
+    let Some(expected) = &request.expected_current else {
+        return Ok(());
+    };
+    match ledger.entries.get(key) {
+        Some(entry)
+            if entry.version == *expected
+                && entry.repo.eq_ignore_ascii_case(&request.repo.full_name()) =>
+        {
+            Ok(())
+        }
+        Some(entry) => Err(Error::msg(format!(
+            "the install ledger entry for {} changed to {} at {} while the update was being prepared; refusing to replace it",
+            target.display(),
+            entry.repo,
+            entry.version
+        ))),
+        None => Err(Error::msg(format!(
+            "{} is no longer recorded in the install ledger; refusing to replace it automatically",
+            target.display()
+        ))),
     }
 }
 
@@ -810,6 +889,7 @@ mod tests {
             name: None,
             force: false,
             allow_unverified: false,
+            expected_current: None,
         };
         let bin_dir = BinDir {
             path: PathBuf::from("/tmp/harbor-plan-bin"),
@@ -851,6 +931,7 @@ mod tests {
             name: None,
             force: false,
             allow_unverified: false,
+            expected_current: None,
         };
         let bin_dir = BinDir {
             path: PathBuf::from("/tmp/harbor-plan-bin"),
@@ -923,6 +1004,74 @@ mod tests {
         assert!(packages[0].present);
         assert!(packages[0].is_update(Some("v3.0.0")));
         assert!(!packages[0].is_update(Some("v2.0.0")));
+    }
+
+    #[test]
+    fn expected_current_must_match_the_locked_ledger() {
+        let target = Path::new("/tmp/harbor-test/tool");
+        let key = ledger_key(target);
+        let mut request = InstallRequest {
+            repo: RepoRef {
+                owner: "owner".to_owned(),
+                name: "tool".to_owned(),
+            },
+            tag: Some("v2.0.0".to_owned()),
+            asset_name: None,
+            asset_glob: None,
+            binary: None,
+            name: None,
+            force: false,
+            allow_unverified: false,
+            expected_current: Some("v1.0.0".to_owned()),
+        };
+        let mut ledger = Ledger::default();
+        ledger.entries.insert(
+            key.clone(),
+            entry("owner/tool", "v1.0.0", 10, "/tmp/harbor-test"),
+        );
+        assert!(ensure_expected_current(&request, &ledger, &key, target).is_ok());
+
+        ledger.entries.insert(
+            key.clone(),
+            entry("owner/tool", "v1.5.0", 20, "/tmp/harbor-test"),
+        );
+        assert!(ensure_expected_current(&request, &ledger, &key, target).is_err());
+
+        ledger.entries.insert(
+            key.clone(),
+            entry("other/tool", "v1.0.0", 20, "/tmp/harbor-test"),
+        );
+        assert!(ensure_expected_current(&request, &ledger, &key, target).is_err());
+
+        ledger.entries.clear();
+        assert!(ensure_expected_current(&request, &ledger, &key, target).is_err());
+
+        request.expected_current = None;
+        assert!(ensure_expected_current(&request, &ledger, &key, target).is_ok());
+    }
+
+    #[test]
+    fn ledger_packages_keep_every_managed_executable() {
+        let temp = tempfile::tempdir().unwrap();
+        let first = temp.path().join("tool");
+        let second = temp.path().join("tool-extra");
+        fs::write(&first, "one").unwrap();
+        fs::write(&second, "two").unwrap();
+        let mut ledger = Ledger::default();
+        ledger.entries.insert(
+            second.display().to_string(),
+            entry("owner/tool", "v2.0.0", 20, temp.path().to_str().unwrap()),
+        );
+        ledger.entries.insert(
+            first.display().to_string(),
+            entry("owner/tool", "v2.0.0", 10, temp.path().to_str().unwrap()),
+        );
+        let packages = ledger_packages(&ledger);
+        assert_eq!(packages.len(), 2);
+        assert_eq!(packages[0].path, first);
+        assert_eq!(packages[1].path, second);
+        assert!(packages.iter().all(|package| package.present));
+        assert!(packages.iter().all(|package| package.binaries == 1));
     }
 
     #[test]

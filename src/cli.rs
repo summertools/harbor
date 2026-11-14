@@ -1,5 +1,6 @@
 //! Command-line interface and non-interactive workflows.
 
+use std::collections::HashMap;
 use std::env;
 use std::fs;
 use std::io::{self, IsTerminal, Write};
@@ -11,10 +12,10 @@ use crate::checksum;
 use crate::config::{self, Config, Source};
 use crate::error::{Error, Result};
 use crate::format;
-use crate::github::{GitHubClient, RepoRef};
+use crate::github::{GitHubClient, Release, RepoRef};
 use crate::install::{
     InstallOutcome, InstallRequest, InstallStage, InstalledPackage, Installer, Ledger,
-    installed_packages,
+    installed_packages, ledger_packages,
 };
 use crate::output::{self, Painter};
 use crate::platform;
@@ -75,6 +76,9 @@ pub enum Command {
     Install(InstallArgs),
     /// Update binaries recorded in the install ledger.
     Update(UpdateArgs),
+    /// Apply pending auto-updates enabled by config (for cron/timers).
+    #[command(name = "autoupdate", visible_alias = "auto-update")]
+    AutoUpdate(AutoUpdateArgs),
     /// Search configured sources without installing.
     Search(SearchArgs),
     /// Manage organisation and repository sources.
@@ -148,6 +152,13 @@ pub struct InstallArgs {
     /// Resolve the plan and stop before downloading.
     #[arg(long)]
     pub dry_run: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct AutoUpdateArgs {
+    /// Only report what would be updated; download nothing.
+    #[arg(long, alias = "dry-run")]
+    pub check: bool,
 }
 
 #[derive(Debug, Args)]
@@ -297,6 +308,7 @@ pub fn run(mut cli: Cli) -> Result<()> {
         }
         Command::Install(args) => install_command(&cli, config, warnings, args, painter),
         Command::Update(args) => update_command(&cli, config, warnings, args, painter),
+        Command::AutoUpdate(args) => auto_update_command(&cli, config, warnings, args, painter),
         Command::Search(args) => {
             let client = GitHubClient::new()?;
             let mut discovery = crate::discover(&config, &client);
@@ -357,6 +369,7 @@ fn install_command(
         name: args.name.clone(),
         force: args.force,
         allow_unverified: args.allow_unverified || config.allow_unverified,
+        expected_current: None,
     };
     let mut plan = harbor.plan(request.clone())?;
     if !cli.quiet && !cli.json {
@@ -419,6 +432,188 @@ fn install_command(
     Ok(())
 }
 
+fn auto_update_command(
+    cli: &Cli,
+    config: Config,
+    warnings: Vec<String>,
+    args: AutoUpdateArgs,
+    painter: Painter,
+) -> Result<()> {
+    output::print_warnings(&warnings, painter);
+    if !config.auto_update && !args.check {
+        if cli.json {
+            output::print_json(&AutoUpdateJson::disabled());
+        } else if !cli.quiet {
+            println!(
+                "{}",
+                painter.dim("auto-update is disabled in config (set auto_update = true)")
+            );
+        }
+        return Ok(());
+    }
+    let client = GitHubClient::new()?;
+    let ledger = Ledger::load()?;
+    let packages = ledger_packages(&ledger);
+    if packages.is_empty() {
+        if cli.json {
+            output::print_json(&AutoUpdateJson::empty(config.auto_update));
+        } else if !cli.quiet {
+            println!("{}", painter.dim("no managed installs recorded"));
+        }
+        return Ok(());
+    }
+    let checksum_config = crate::update::checksum_only_config(config.clone());
+    let checked = packages.len();
+    let mut report = AutoUpdateJson::empty(config.auto_update);
+    report.checked = checked;
+    let mut latest_cache: HashMap<String, std::result::Result<Release, String>> = HashMap::new();
+    for package in packages {
+        let repo = match RepoRef::parse(&package.repo) {
+            Ok(repo) => repo,
+            Err(error) => {
+                report.failed.push(AutoUpdateSkip {
+                    repo: package.repo.clone(),
+                    path: package.path.display().to_string(),
+                    reason: format!("invalid repository name: {error}"),
+                });
+                continue;
+            }
+        };
+        let latest = latest_cache
+            .entry(package.repo.to_ascii_lowercase())
+            .or_insert_with(|| {
+                client
+                    .latest_release(&repo, config.include_prereleases)
+                    .map_err(|error| error.to_string())
+            });
+        let latest = match latest {
+            Ok(release) => release.clone(),
+            Err(error) => {
+                report.failed.push(AutoUpdateSkip {
+                    repo: package.repo.clone(),
+                    path: package.path.display().to_string(),
+                    reason: format!("latest unavailable: {error}"),
+                });
+                continue;
+            }
+        };
+        match crate::update::decide(
+            &checksum_config,
+            platform::Platform::current(),
+            &package,
+            &latest,
+        ) {
+            crate::update::Decision::Current => {
+                report.current.push(package.repo.clone());
+            }
+            crate::update::Decision::Skip { reason } => {
+                report.skipped.push(AutoUpdateSkip {
+                    repo: package.repo.clone(),
+                    path: package.path.display().to_string(),
+                    reason,
+                });
+            }
+            crate::update::Decision::Update(plan) => {
+                report.available.push(AutoUpdateEntry {
+                    repo: package.repo.clone(),
+                    from: plan.from_version().to_owned(),
+                    to: plan.to_version().to_owned(),
+                    path: plan.package.path.display().to_string(),
+                });
+                if args.check {
+                    continue;
+                }
+                if !cli.quiet && !cli.json {
+                    println!(
+                        "{} {} {} → {}",
+                        painter.accent("auto-update"),
+                        painter.bold(&plan.package.repo),
+                        plan.from_version(),
+                        painter.accent(plan.to_version())
+                    );
+                }
+                let bin_dir = match platform::resolve_bin_dir(Some(&plan.package.bin_dir), None) {
+                    Ok(bin_dir) => bin_dir,
+                    Err(error) => {
+                        report.failed.push(AutoUpdateSkip {
+                            repo: package.repo.clone(),
+                            path: plan.package.path.display().to_string(),
+                            reason: format!("install directory unavailable: {error}"),
+                        });
+                        continue;
+                    }
+                };
+                let installer = Installer::new(&client, &checksum_config, bin_dir);
+                let mut progress = ConsoleProgress::new(!cli.quiet);
+                match crate::update::install(&plan, &installer, |event| progress.update(event)) {
+                    Ok(outcome) => {
+                        progress.finish();
+                        if !cli.quiet && !cli.json {
+                            output::print_outcome(&outcome, painter);
+                        }
+                        report.updated.push(AutoUpdateEntry {
+                            repo: outcome.repo,
+                            from: plan.from_version().to_owned(),
+                            to: outcome.version,
+                            path: outcome.path.display().to_string(),
+                        });
+                    }
+                    Err(error) => {
+                        progress.finish();
+                        report.failed.push(AutoUpdateSkip {
+                            repo: package.repo.clone(),
+                            path: package.path.display().to_string(),
+                            reason: format::sanitize(&error.to_string()),
+                        });
+                    }
+                }
+            }
+        }
+    }
+    if cli.json {
+        output::print_json(&report);
+    } else if !cli.quiet {
+        for repo in &report.current {
+            println!("{} {} is up to date", painter.good("✓"), repo);
+        }
+        for failure in &report.failed {
+            println!(
+                "{} {} ({}): {}",
+                painter.error("failed"),
+                painter.bold(&failure.repo),
+                painter.dim(&format::sanitize(&failure.path)),
+                format::sanitize(&failure.reason)
+            );
+        }
+        for skip in &report.skipped {
+            println!(
+                "{} {} ({}): {}",
+                painter.warning("skipped"),
+                painter.bold(&skip.repo),
+                painter.dim(&format::sanitize(&skip.path)),
+                format::sanitize(&skip.reason)
+            );
+        }
+        println!(
+            "\n{}",
+            painter.dim(&format!(
+                "{} checked · {} available · {} updated · {} failed · {} skipped",
+                report.checked,
+                report.available.len(),
+                report.updated.len(),
+                report.failed.len(),
+                report.skipped.len()
+            ))
+        );
+    }
+    if !report.failed.is_empty() {
+        return Err(Error::msg(
+            "one or more automatic updates failed; see the report above",
+        ));
+    }
+    Ok(())
+}
+
 fn update_command(
     cli: &Cli,
     config: Config,
@@ -469,6 +664,7 @@ fn update_command(
             name: Some(name.to_owned()),
             force: args.force,
             allow_unverified: args.allow_unverified || config.allow_unverified,
+            expected_current: None,
         };
         let plan = installer.plan(request)?;
         let current_ok = fs::symlink_metadata(target).is_ok_and(|metadata| metadata.is_file())
@@ -682,6 +878,14 @@ fn doctor_command(
         "ledger",
         platform::compact_path(&Ledger::default_path()),
     ));
+    checks.push(Check::ok(
+        "auto-update",
+        if config.auto_update {
+            "enabled · checksum-only"
+        } else {
+            "disabled"
+        },
+    ));
     match harbor.client.rate_limit() {
         Ok((limit, remaining, reset)) => {
             checks.push(Check::ok(
@@ -889,6 +1093,50 @@ fn console_spinner(stage: InstallStage) -> &'static str {
         InstallStage::Extracting => "◇",
         InstallStage::Installing => "→",
         InstallStage::Complete => "✓",
+    }
+}
+
+#[derive(serde::Serialize)]
+struct AutoUpdateEntry {
+    repo: String,
+    from: String,
+    to: String,
+    path: String,
+}
+
+#[derive(serde::Serialize)]
+struct AutoUpdateSkip {
+    repo: String,
+    path: String,
+    reason: String,
+}
+
+#[derive(serde::Serialize)]
+struct AutoUpdateJson {
+    enabled: bool,
+    checked: usize,
+    available: Vec<AutoUpdateEntry>,
+    updated: Vec<AutoUpdateEntry>,
+    failed: Vec<AutoUpdateSkip>,
+    current: Vec<String>,
+    skipped: Vec<AutoUpdateSkip>,
+}
+
+impl AutoUpdateJson {
+    fn empty(enabled: bool) -> Self {
+        Self {
+            enabled,
+            checked: 0,
+            available: Vec::new(),
+            updated: Vec::new(),
+            failed: Vec::new(),
+            current: Vec::new(),
+            skipped: Vec::new(),
+        }
+    }
+
+    fn disabled() -> Self {
+        Self::empty(false)
     }
 }
 
