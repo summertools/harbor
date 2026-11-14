@@ -26,6 +26,9 @@ pub enum Error {
     #[error("not found: {0}")]
     NotFound(String),
 
+    #[error("no release: {0}")]
+    NoRelease(String),
+
     #[error(
         "GitHub API rate limit exceeded{detail}",
         detail = .reset.as_deref().map(|reset| format!("; resets {reset}")).unwrap_or_default()

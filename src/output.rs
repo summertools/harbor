@@ -1,5 +1,6 @@
 //! Human-readable non-interactive output.
 
+use std::collections::HashMap;
 use std::env;
 use std::io::{self, Write};
 
@@ -8,7 +9,7 @@ use serde::Serialize;
 use crate::Discovery;
 use crate::format;
 use crate::github::{Release, RepoRef};
-use crate::install::{InstallOutcome, InstallPlan};
+use crate::install::{InstallOutcome, InstallPlan, InstalledPackage};
 use crate::platform::Platform;
 use crate::release;
 
@@ -96,21 +97,50 @@ struct RepoJson<'a> {
     archived: bool,
     fork: bool,
     html_url: Option<&'a str>,
+    installed: Option<InstalledJson<'a>>,
 }
 
-pub fn print_repos(discovery: &Discovery, show_archived: bool, json: bool, painter: Painter) {
+#[derive(Serialize)]
+struct InstalledJson<'a> {
+    version: &'a str,
+    path: String,
+    installed_at: u64,
+    binaries: usize,
+    present: bool,
+}
+
+pub fn print_repos(
+    discovery: &Discovery,
+    show_archived: bool,
+    json: bool,
+    painter: Painter,
+    installed: &[InstalledPackage],
+) {
+    let installed: HashMap<String, &InstalledPackage> = installed
+        .iter()
+        .map(|package| (package.repo.to_ascii_lowercase(), package))
+        .collect();
     if json {
         let rows: Vec<RepoJson<'_>> = discovery
             .repos
             .iter()
             .filter(|repo| show_archived || !repo.archived)
             .map(|repo| RepoJson {
-                source: repo.source.label(),
+                source: repo.display_source(),
                 full_name: &repo.full_name,
                 description: repo.description.as_deref(),
                 archived: repo.archived,
                 fork: repo.fork,
                 html_url: repo.html_url.as_deref(),
+                installed: installed
+                    .get(repo.full_name.as_str())
+                    .map(|package| InstalledJson {
+                        version: &package.version,
+                        path: package.display_path(),
+                        installed_at: package.installed_at,
+                        binaries: package.binaries,
+                        present: package.present,
+                    }),
             })
             .collect();
         print_json(&rows);
@@ -124,10 +154,32 @@ pub fn print_repos(discovery: &Discovery, show_archived: bool, json: bool, paint
         .filter(|repo| show_archived || !repo.archived)
     {
         shown += 1;
-        let badge = painter.dim(&format!("[{}]", repo.source.label()));
+        let badge = painter.dim(&format!("[{}]", repo.display_source()));
         let raw_name = format::sanitize(&repo.full_name);
-        let name_column = 34.min(width / 2);
+        let name_column = 30.min(width / 3).max(14);
         let name = format::pad_right(&format::truncate(&raw_name, name_column), name_column);
+        let package = installed.get(&repo.full_name.to_ascii_lowercase()).copied();
+        let status_column = 20.min(width / 4).max(10);
+        let status_rendered = match package {
+            Some(package) if !package.present => {
+                let suffix = format!("missing {}", package.version);
+                painter.warning(&format::pad_right(
+                    &format::truncate(&suffix, status_column),
+                    status_column,
+                ))
+            }
+            Some(package) => {
+                let suffix = format!("installed {}", package.version);
+                painter.good(&format::pad_right(
+                    &format::truncate(&suffix, status_column),
+                    status_column,
+                ))
+            }
+            None => painter.dim(&format::pad_right(
+                &format::truncate("not installed", status_column),
+                status_column,
+            )),
+        };
         let mut tags = String::new();
         let mut tags_width = 0usize;
         if repo.archived {
@@ -138,21 +190,33 @@ pub fn print_repos(discovery: &Discovery, show_archived: bool, json: bool, paint
             tags.push_str(&painter.dim(" fork"));
             tags_width += " fork".len();
         }
-        let used = name_column + format::width(&repo.source.label()) + 8 + tags_width;
-        let description_width = width.saturating_sub(used).max(10);
+        let used =
+            name_column + format::width(&repo.display_source()) + tags_width + status_column + 10;
+        let description_width = width.saturating_sub(used);
         let description = repo
             .description
             .as_deref()
             .map(format::sanitize)
             .unwrap_or_default();
-        let description = format::truncate(&description, description_width);
-        println!(
-            "{} {}  {}{}",
-            badge,
-            painter.bold(&name),
-            painter.dim(&description),
-            tags
-        );
+        if description_width >= 8 {
+            let description = format::truncate(&description, description_width);
+            println!(
+                "{} {}  {}  {}{}",
+                badge,
+                painter.bold(&name),
+                status_rendered,
+                painter.dim(&description),
+                tags
+            );
+        } else {
+            println!(
+                "{} {}  {}{}",
+                badge,
+                painter.bold(&name),
+                status_rendered,
+                tags
+            );
+        }
     }
     if shown == 0 {
         println!("{}", painter.dim("no repositories found"));
@@ -325,6 +389,174 @@ pub fn print_outcome(outcome: &InstallOutcome, painter: Painter) {
             format::sanitize(warning)
         );
     }
+}
+
+/// One row in the installed-status table.
+#[derive(Clone, Debug, Serialize)]
+pub struct StatusEntry {
+    pub repo: String,
+    pub installed: String,
+    pub latest: Option<String>,
+    pub state: StatusState,
+    pub path: String,
+    pub binaries: usize,
+    pub installed_at: u64,
+    pub present: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum StatusState {
+    UpToDate,
+    UpdateAvailable,
+    Installed,
+    Missing,
+    LatestUnavailable,
+    NoCompatibleAsset,
+}
+
+impl StatusState {
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::UpToDate => "up to date",
+            Self::UpdateAvailable => "update available",
+            Self::Installed => "installed",
+            Self::Missing => "missing",
+            Self::LatestUnavailable => "latest unavailable",
+            Self::NoCompatibleAsset => "no compatible asset",
+        }
+    }
+}
+
+impl StatusEntry {
+    #[must_use]
+    pub fn from_package(
+        package: &InstalledPackage,
+        latest: Option<&Release>,
+        latest_error: Option<String>,
+        compatible: bool,
+        offline: bool,
+    ) -> Self {
+        let state = if !package.present {
+            StatusState::Missing
+        } else if offline {
+            StatusState::Installed
+        } else if latest_error.is_some() {
+            StatusState::LatestUnavailable
+        } else if latest.is_some_and(|_| !compatible) {
+            StatusState::NoCompatibleAsset
+        } else if latest.is_some_and(|release| release.tag_name == package.version) {
+            StatusState::UpToDate
+        } else if latest.is_some() {
+            StatusState::UpdateAvailable
+        } else {
+            StatusState::Installed
+        };
+        Self {
+            repo: package.repo.clone(),
+            installed: package.version.clone(),
+            latest: latest.map(|release| release.tag_name.clone()),
+            state,
+            path: package.display_path(),
+            binaries: package.binaries,
+            installed_at: package.installed_at,
+            present: package.present,
+            note: latest_error.map(|error| format::sanitize(&error)),
+        }
+    }
+}
+
+pub fn print_status(entries: &[StatusEntry], offline: bool, json: bool, painter: Painter) {
+    if json {
+        print_json(&entries);
+        return;
+    }
+    if entries.is_empty() {
+        println!("{}", painter.dim("no managed installs recorded"));
+        return;
+    }
+    let width = terminal_width();
+    let repo_width = 28.min(width / 3).max(16);
+    let version_width = 10.min(width / 6).max(8);
+    let state_width = 20.min(width / 4).max(12);
+    let path_width = width
+        .saturating_sub(repo_width + version_width * 2 + state_width + 12)
+        .max(8);
+    println!(
+        "{} {} {} {} {}",
+        painter.dim(&format::pad_right("REPO", repo_width)),
+        painter.dim(&format::pad_right("INSTALLED", version_width)),
+        painter.dim(&format::pad_right("LATEST", version_width)),
+        painter.dim(&format::pad_right("STATE", state_width)),
+        painter.dim("PATH")
+    );
+    let mut updates = 0usize;
+    for entry in entries {
+        if entry.state == StatusState::UpdateAvailable {
+            updates += 1;
+        }
+        let state = format::pad_right(
+            &format::truncate(entry.state.label(), state_width),
+            state_width,
+        );
+        let state = match entry.state {
+            StatusState::UpToDate => painter.good(&state),
+            StatusState::UpdateAvailable => painter.warning(&state),
+            StatusState::Missing => painter.error(&state),
+            StatusState::NoCompatibleAsset | StatusState::LatestUnavailable => {
+                painter.warning(&state)
+            }
+            StatusState::Installed => painter.dim(&state),
+        };
+        let clean_repo = format::sanitize(&entry.repo);
+        let repo = format::truncate(&clean_repo, repo_width);
+        let installed = format::pad_right(&format::sanitize(&entry.installed), version_width);
+        let latest = entry.latest.as_deref().unwrap_or("-");
+        let latest = format::pad_right(
+            &format::truncate(&format::sanitize(latest), version_width),
+            version_width,
+        );
+        let mut path = if path_width >= 8 {
+            format::truncate(&format::sanitize(&entry.path), path_width).into_owned()
+        } else {
+            String::new()
+        };
+        if entry.binaries > 1 {
+            path.push_str(&format!(" +{}", entry.binaries - 1));
+        }
+        println!(
+            "{} {} {} {} {}",
+            painter.bold(&format::pad_right(&repo, repo_width)),
+            painter.dim(&installed),
+            painter.dim(&latest),
+            state,
+            painter.dim(&path)
+        );
+        if let Some(note) = &entry.note {
+            println!(
+                "{} {}",
+                painter.dim(&" ".repeat(repo_width + 1)),
+                painter.dim(&format::truncate(
+                    note,
+                    width.saturating_sub(repo_width + 2)
+                ))
+            );
+        }
+    }
+    println!(
+        "\n{}",
+        painter.dim(&format!(
+            "{} managed install{} · {} update{}{}",
+            entries.len(),
+            if entries.len() == 1 { "" } else { "s" },
+            updates,
+            if updates == 1 { "" } else { "s" },
+            if offline { " · offline" } else { "" }
+        ))
+    );
 }
 
 pub fn print_json<T: Serialize>(value: &T) {

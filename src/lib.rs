@@ -29,8 +29,8 @@ pub use config::{Config, Source, SourceKind};
 pub use error::{Error, Result};
 pub use github::{Asset, GitHubClient, Release, RepoRef, RepoSummary};
 pub use install::{
-    InstallOutcome, InstallPlan, InstallRequest, InstallStage, Installer, Ledger, LedgerEntry,
-    ProgressEvent,
+    InstallOutcome, InstallPlan, InstallRequest, InstallStage, InstalledPackage, Installer, Ledger,
+    LedgerEntry, ProgressEvent, installed_packages,
 };
 pub use platform::{BinDir, Platform};
 
@@ -47,9 +47,21 @@ pub struct RepoItem {
     pub archived: bool,
     pub fork: bool,
     pub html_url: Option<String>,
+    /// True for a synthetic entry created from the install ledger because its
+    /// repository is no longer present in any configured source.
+    pub installed_only: bool,
 }
 
 impl RepoItem {
+    #[must_use]
+    pub fn display_source(&self) -> String {
+        if self.installed_only {
+            "installed · local".to_owned()
+        } else {
+            self.source.label()
+        }
+    }
+
     #[must_use]
     pub fn repo_ref(&self) -> RepoRef {
         RepoRef {
@@ -178,6 +190,7 @@ pub fn discover(config: &Config, client: &GitHubClient) -> Discovery {
                             archived: repo.archived,
                             fork: repo.fork,
                             html_url: repo.html_url,
+                            installed_only: false,
                         });
                     }
                 }
@@ -213,6 +226,7 @@ pub fn discover(config: &Config, client: &GitHubClient) -> Discovery {
                     archived,
                     fork,
                     html_url,
+                    installed_only: false,
                 });
             }
         }
@@ -225,6 +239,50 @@ pub fn discover(config: &Config, client: &GitHubClient) -> Discovery {
         })
     });
     discovery
+}
+
+/// Merge ledger-only repositories into a discovered list. This keeps managed
+/// binaries visible even after their source is removed from the config.
+pub fn merge_installed_repos(repos: &mut Vec<RepoItem>, installed: &[InstalledPackage]) {
+    let mut existing: HashSet<String> = repos
+        .iter()
+        .map(|repo| repo.full_name.to_ascii_lowercase())
+        .collect();
+    let mut added = false;
+    for package in installed {
+        let key = package.repo.to_ascii_lowercase();
+        if !existing.insert(key) {
+            continue;
+        }
+        let Ok(repo) = RepoRef::parse(&package.repo) else {
+            continue;
+        };
+        let Ok(source) = Source::repo(package.repo.clone()) else {
+            continue;
+        };
+        repos.push(RepoItem {
+            source,
+            full_name: repo.full_name(),
+            name: repo.name,
+            description: Some(
+                "Installed tool; its repository is not in a configured source.".to_owned(),
+            ),
+            archived: false,
+            fork: false,
+            html_url: None,
+            installed_only: true,
+        });
+        added = true;
+    }
+    if added {
+        repos.sort_by(|left, right| {
+            left.archived.cmp(&right.archived).then_with(|| {
+                left.full_name
+                    .to_ascii_lowercase()
+                    .cmp(&right.full_name.to_ascii_lowercase())
+            })
+        });
+    }
 }
 
 /// Resolve a repository using the configured sources.

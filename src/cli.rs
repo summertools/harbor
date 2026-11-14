@@ -12,9 +12,13 @@ use crate::config::{self, Config, Source};
 use crate::error::{Error, Result};
 use crate::format;
 use crate::github::{GitHubClient, RepoRef};
-use crate::install::{InstallOutcome, InstallRequest, InstallStage, Installer, Ledger};
+use crate::install::{
+    InstallOutcome, InstallRequest, InstallStage, InstalledPackage, Installer, Ledger,
+    installed_packages,
+};
 use crate::output::{self, Painter};
 use crate::platform;
+use crate::release;
 use crate::ui::{self, UiOptions};
 
 /// Safe, interactive installer for GitHub release binaries.
@@ -27,7 +31,7 @@ use crate::ui::{self, UiOptions};
                   chooses an asset for the current platform, verifies its SHA-256 digest, \
                   extracts it safely, and installs it atomically into a user-controlled \
                   executable directory.\n\nRun without a subcommand to open the interactive UI.",
-    after_help = "SOURCES:\n  harbor source add org summertools\n  harbor source add repo BurntSushi/ripgrep\n  harbor source list\n  harbor source remove summertools\n\nTUI KEYS:\n  ↑/k, ↓/j    move          /       search\n  Tab         switch pane   s       sources\n  Enter       inspect/install  r    refresh\n  ?           help          q       quit\n\nSAFETY:\n  Only HTTPS GitHub download hosts are accepted. SHA-256 is verified when\n  published. Archives are extracted without links, devices, or path traversal.\n  Existing files are only replaced when harbor installed them or --force is used.\n\nExamples:\n  harbor\n  harbor install rtop\n  harbor install summertools/dulens --yes\n  harbor list --source summertools --all\n  harbor releases rtop\n  harbor update --yes\n  harbor doctor"
+    after_help = "SOURCES:\n  harbor source add org summertools\n  harbor source add repo BurntSushi/ripgrep\n  harbor source list\n  harbor source remove summertools\n\nTUI KEYS:\n  ↑/k, ↓/j    move          /       search\n  Tab         switch pane   s       sources\n  Enter       inspect/install  v    status filter\n  r           refresh       ?       help\n  q           quit\n\nSAFETY:\n  Only HTTPS GitHub download hosts are accepted. SHA-256 is verified when\n  published. Archives are extracted without links, devices, or path traversal.\n  Existing files are only replaced when harbor installed them or --force is used.\n\nExamples:\n  harbor\n  harbor install rtop\n  harbor install summertools/dulens --yes\n  harbor list --source summertools --all\n  harbor list --installed\n  harbor list --available\n  harbor releases rtop\n  harbor status\n  harbor status --offline\n  harbor update --yes\n  harbor doctor"
 )]
 pub struct Cli {
     /// Use an explicit config file.
@@ -61,6 +65,8 @@ pub enum Command {
     /// List repositories from configured sources.
     #[command(visible_alias = "ls")]
     List(ListArgs),
+    /// Show installed versions and update availability.
+    Status(StatusArgs),
     /// List recent releases and compatible assets.
     #[command(visible_alias = "rel")]
     Releases(ReleasesArgs),
@@ -87,6 +93,19 @@ pub struct ListArgs {
     /// Include archived repositories.
     #[arg(long)]
     pub all: bool,
+    /// Show only repositories with a managed install.
+    #[arg(long, conflicts_with = "available")]
+    pub installed: bool,
+    /// Show only repositories without a managed install.
+    #[arg(long)]
+    pub available: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct StatusArgs {
+    /// Do not contact GitHub; show recorded installs only.
+    #[arg(long)]
+    pub offline: bool,
 }
 
 #[derive(Debug, Args)]
@@ -220,17 +239,36 @@ pub fn run(mut cli: Cli) -> Result<()> {
             )
         }
         Command::List(args) => {
-            output::print_warnings(&warnings, painter);
             let client = GitHubClient::new()?;
             let mut discovery = crate::discover(&config, &client);
             warnings.append(&mut discovery.warnings);
+            let (installed, ledger_warning) = load_installed();
+            if let Some(warning) = ledger_warning {
+                warnings.push(warning);
+            }
             output::print_warnings(&warnings, painter);
+            crate::merge_installed_repos(&mut discovery.repos, &installed);
             if let Some(source) = &args.source {
                 discovery.repos.retain(|repo| repo.source.matches(source));
             }
-            output::print_repos(&discovery, args.all, cli.json, painter);
+            if args.installed || args.available {
+                let keys: std::collections::HashSet<String> = installed
+                    .iter()
+                    .map(|package| package.repo.to_ascii_lowercase())
+                    .collect();
+                discovery.repos.retain(|repo| {
+                    let installed = keys.contains(&repo.full_name.to_ascii_lowercase());
+                    if args.installed {
+                        installed
+                    } else {
+                        !installed
+                    }
+                });
+            }
+            output::print_repos(&discovery, args.all, cli.json, painter, &installed);
             Ok(())
         }
+        Command::Status(args) => status_command(&config, warnings, args, cli.json, painter),
         Command::Releases(args) => {
             output::print_warnings(&warnings, painter);
             let client = GitHubClient::new()?;
@@ -260,11 +298,15 @@ pub fn run(mut cli: Cli) -> Result<()> {
         Command::Install(args) => install_command(&cli, config, warnings, args, painter),
         Command::Update(args) => update_command(&cli, config, warnings, args, painter),
         Command::Search(args) => {
-            output::print_warnings(&warnings, painter);
             let client = GitHubClient::new()?;
             let mut discovery = crate::discover(&config, &client);
             warnings.append(&mut discovery.warnings);
+            let (installed, ledger_warning) = load_installed();
+            if let Some(warning) = ledger_warning {
+                warnings.push(warning);
+            }
             output::print_warnings(&warnings, painter);
+            crate::merge_installed_repos(&mut discovery.repos, &installed);
             if let Some(source) = &args.source {
                 discovery.repos.retain(|repo| repo.source.matches(source));
             }
@@ -275,7 +317,7 @@ pub fn run(mut cli: Cli) -> Result<()> {
                         description.to_ascii_lowercase().contains(&query)
                     })
             });
-            output::print_repos(&discovery, args.all, cli.json, painter);
+            output::print_repos(&discovery, args.all, cli.json, painter, &installed);
             Ok(())
         }
         Command::Source(args) => source_command(&cli, args, painter),
@@ -684,6 +726,60 @@ fn reset_hint(reset: u64) -> String {
     } else {
         format!("resets in {} h", seconds.div_ceil(3600))
     }
+}
+
+fn load_installed() -> (Vec<InstalledPackage>, Option<String>) {
+    match Ledger::load() {
+        Ok(ledger) => (installed_packages(&ledger), None),
+        Err(error) => (Vec::new(), Some(format!("install ledger: {error}"))),
+    }
+}
+
+fn status_command(
+    config: &Config,
+    warnings: Vec<String>,
+    args: StatusArgs,
+    json: bool,
+    painter: Painter,
+) -> Result<()> {
+    output::print_warnings(&warnings, painter);
+    let ledger = Ledger::load()?;
+    let packages = installed_packages(&ledger);
+    if packages.is_empty() {
+        output::print_status(&[], args.offline, json, painter);
+        return Ok(());
+    }
+    let client = if args.offline {
+        None
+    } else {
+        Some(GitHubClient::new()?)
+    };
+    let mut entries = Vec::with_capacity(packages.len());
+    for package in packages {
+        let repo = RepoRef::parse(&package.repo)?;
+        let (latest, latest_error) = if let Some(client) = &client {
+            match client.latest_release(&repo, config.include_prereleases) {
+                Ok(release) => (Some(release), None),
+                Err(error) => (None, Some(error.to_string())),
+            }
+        } else {
+            (None, None)
+        };
+        let compatible = latest.as_ref().is_none_or(|release| {
+            !release::catalog_assets(crate::platform::Platform::current(), release)
+                .compatible
+                .is_empty()
+        });
+        entries.push(output::StatusEntry::from_package(
+            &package,
+            latest.as_ref(),
+            latest_error,
+            compatible,
+            args.offline,
+        ));
+    }
+    output::print_status(&entries, args.offline, json, painter);
+    Ok(())
 }
 
 fn config_path(cli: &Cli) -> PathBuf {

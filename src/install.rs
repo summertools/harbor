@@ -164,6 +164,9 @@ impl<'a> Installer<'a> {
         plan: &InstallPlan,
         mut progress: impl FnMut(ProgressEvent),
     ) -> Result<InstallOutcome> {
+        // Fail before downloading if the ledger is corrupt: the eventual
+        // ownership check would fail anyway and the user gets immediate help.
+        Ledger::load()?;
         let temp = tempfile::Builder::new()
             .prefix("harbor-")
             .tempdir()
@@ -578,6 +581,73 @@ pub struct LedgerEntry {
     pub bin_dir: String,
 }
 
+/// One repository grouped from the install ledger. A repository can install
+/// more than one binary; the newest entry supplies the displayed version and
+/// path, while `binaries` keeps the full count.
+#[derive(Clone, Debug)]
+pub struct InstalledPackage {
+    pub repo: String,
+    pub version: String,
+    pub path: PathBuf,
+    pub bin_dir: PathBuf,
+    pub installed_at: u64,
+    pub binaries: usize,
+    /// True when the recorded executable still exists as a regular file.
+    pub present: bool,
+}
+
+impl InstalledPackage {
+    #[must_use]
+    pub fn is_update(&self, latest: Option<&str>) -> bool {
+        latest.is_some_and(|latest| latest != self.version)
+    }
+
+    #[must_use]
+    pub fn display_path(&self) -> String {
+        platform::compact_path(&self.path)
+    }
+}
+
+/// Group ledger entries by repository, newest install first.
+#[must_use]
+pub fn installed_packages(ledger: &Ledger) -> Vec<InstalledPackage> {
+    let mut grouped: BTreeMap<String, Vec<(&String, &LedgerEntry)>> = BTreeMap::new();
+    for (path, entry) in &ledger.entries {
+        grouped
+            .entry(entry.repo.to_ascii_lowercase())
+            .or_default()
+            .push((path, entry));
+    }
+    let mut packages = Vec::with_capacity(grouped.len());
+    for entries in grouped.into_values() {
+        let newest = entries
+            .iter()
+            .max_by_key(|(_, entry)| entry.installed_at)
+            .map(|(path, entry)| ((*path).clone(), *entry));
+        let Some((path, entry)) = newest else {
+            continue;
+        };
+        let path = PathBuf::from(path);
+        let present = fs::symlink_metadata(&path)
+            .is_ok_and(|metadata| metadata.is_file() && !metadata.file_type().is_symlink());
+        packages.push(InstalledPackage {
+            repo: entry.repo.clone(),
+            version: entry.version.clone(),
+            path,
+            bin_dir: PathBuf::from(&entry.bin_dir),
+            installed_at: entry.installed_at,
+            binaries: entries.len(),
+            present,
+        });
+    }
+    packages.sort_by(|left, right| {
+        left.repo
+            .to_ascii_lowercase()
+            .cmp(&right.repo.to_ascii_lowercase())
+    });
+    packages
+}
+
 impl Ledger {
     pub fn load() -> Result<Self> {
         Self::load_from(&Self::default_path())
@@ -815,6 +885,44 @@ mod tests {
             ));
             assert_eq!(fs::read_to_string(&real).unwrap(), "old");
         }
+    }
+
+    fn entry(repo: &str, version: &str, installed_at: u64, bin_dir: &str) -> LedgerEntry {
+        LedgerEntry {
+            repo: repo.to_owned(),
+            version: version.to_owned(),
+            asset: "tool.tar.gz".to_owned(),
+            asset_sha256: "a".repeat(64),
+            binary_sha256: "b".repeat(64),
+            installed_at,
+            bin_dir: bin_dir.to_owned(),
+        }
+    }
+
+    #[test]
+    fn installed_packages_group_by_repository_and_keep_the_newest() {
+        let temp = tempfile::tempdir().unwrap();
+        let older = temp.path().join("tool-old");
+        let newer = temp.path().join("tool-new");
+        fs::write(&older, "old").unwrap();
+        fs::write(&newer, "new").unwrap();
+        let mut ledger = Ledger::default();
+        ledger.entries.insert(
+            older.display().to_string(),
+            entry("owner/tool", "v1.0.0", 10, temp.path().to_str().unwrap()),
+        );
+        ledger.entries.insert(
+            newer.display().to_string(),
+            entry("Owner/Tool", "v2.0.0", 20, temp.path().to_str().unwrap()),
+        );
+        let packages = installed_packages(&ledger);
+        assert_eq!(packages.len(), 1);
+        assert_eq!(packages[0].version, "v2.0.0");
+        assert_eq!(packages[0].path, newer);
+        assert_eq!(packages[0].binaries, 2);
+        assert!(packages[0].present);
+        assert!(packages[0].is_update(Some("v3.0.0")));
+        assert!(!packages[0].is_update(Some("v2.0.0")));
     }
 
     #[test]

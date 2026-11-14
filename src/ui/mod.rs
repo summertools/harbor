@@ -2,6 +2,7 @@
 
 mod draw;
 
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
@@ -23,7 +24,8 @@ use crate::config::{Config, Source};
 use crate::error::{Error, Result};
 use crate::github::{GitHubClient, Release, RepoRef};
 use crate::install::{
-    self, InstallOutcome, InstallPlan, InstallRequest, InstallStage, Installer, ProgressEvent,
+    self, InstallOutcome, InstallPlan, InstallRequest, InstallStage, InstalledPackage, Installer,
+    Ledger, ProgressEvent, installed_packages,
 };
 use crate::platform::{BinDir, Platform};
 use crate::release::{self, AssetChoice};
@@ -155,6 +157,7 @@ enum WorkerEvent {
     Release {
         repo: RepoRef,
         result: std::result::Result<Release, String>,
+        no_release: bool,
     },
     Progress(ProgressEvent),
     Installed {
@@ -187,11 +190,20 @@ impl Worker {
                             repo,
                             include_prereleases,
                         } => {
-                            let result = client
-                                .latest_release(&repo, include_prereleases)
-                                .map_err(|error| error.to_string());
+                            let (result, no_release) =
+                                match client.latest_release(&repo, include_prereleases) {
+                                    Ok(release) => (Ok(release), false),
+                                    Err(Error::NotFound(message) | Error::NoRelease(message)) => {
+                                        (Err(message), true)
+                                    }
+                                    Err(error) => (Err(error.to_string()), false),
+                                };
                             if event_tx
-                                .send(WorkerEvent::Release { repo, result })
+                                .send(WorkerEvent::Release {
+                                    repo,
+                                    result,
+                                    no_release,
+                                })
                                 .is_err()
                             {
                                 break;
@@ -234,6 +246,55 @@ pub(crate) enum Focus {
     Assets,
 }
 
+/// Status filter shown above the repository list.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum StatusFilter {
+    All,
+    Installed,
+    Updates,
+    NotInstalled,
+}
+
+impl StatusFilter {
+    fn next(self) -> Self {
+        match self {
+            Self::All => Self::Installed,
+            Self::Installed => Self::Updates,
+            Self::Updates => Self::NotInstalled,
+            Self::NotInstalled => Self::All,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::All => "all",
+            Self::Installed => "installed",
+            Self::Updates => "updates",
+            Self::NotInstalled => "not installed",
+        }
+    }
+}
+
+/// Why a latest release could not be shown.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ReleaseErrorKind {
+    NoRelease,
+    Unavailable,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct ReleaseError {
+    pub message: String,
+    pub kind: ReleaseErrorKind,
+}
+
+/// Latest-release metadata cached for status chips and quick browsing.
+#[derive(Clone, Debug)]
+pub(crate) struct LatestInfo {
+    pub release: Release,
+    pub compatible: usize,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum StatusLevel {
     Info,
@@ -252,18 +313,22 @@ pub(crate) struct ReleaseView {
     pub repo: RepoRef,
     pub release: Release,
     pub choices: Vec<AssetChoice>,
+    pub others: Vec<AssetChoice>,
     pub selected: usize,
     pub asset_state: ListState,
 }
 
 impl ReleaseView {
-    fn new(repo: RepoRef, release: Release, choices: Vec<AssetChoice>) -> Self {
+    fn new(repo: RepoRef, release: Release, catalog: release::AssetCatalog) -> Self {
+        let selected = usize::from(!catalog.compatible.is_empty());
         Self {
             repo,
             release,
-            choices,
+            choices: catalog.compatible,
+            others: catalog.incompatible,
             selected: 0,
-            asset_state: ListState::default().with_selected(Some(0)),
+            asset_state: ListState::default()
+                .with_selected(Some(selected).filter(|value| *value > 0)),
         }
     }
 
@@ -276,6 +341,7 @@ pub(crate) struct ConfirmState {
     pub plan: InstallPlan,
     pub allow_unverified: bool,
     pub force: bool,
+    pub installed_version: Option<String>,
 }
 
 pub(crate) struct ProgressState {
@@ -320,8 +386,15 @@ pub(crate) struct UiState {
     pub release: Option<ReleaseView>,
     pub release_loading: bool,
     release_inflight: Option<String>,
-    pub release_error: Option<String>,
-    release_failed_for: Option<String>,
+    pub release_error: Option<ReleaseError>,
+    pub ledger: Ledger,
+    pub ledger_error: Option<String>,
+    pub installed: Vec<InstalledPackage>,
+    installed_by_repo: HashMap<String, InstalledPackage>,
+    pub latest: HashMap<String, LatestInfo>,
+    latest_errors: HashMap<String, ReleaseError>,
+    status_inflight: HashSet<String>,
+    pub status_filter: StatusFilter,
     pub last_selection_change: Instant,
     pub search_query: String,
     pub search_buffer: String,
@@ -344,7 +417,7 @@ impl UiState {
         color: bool,
         config_path: PathBuf,
     ) -> Self {
-        Self {
+        let mut state = Self {
             config,
             config_path,
             platform,
@@ -359,7 +432,14 @@ impl UiState {
             release_loading: false,
             release_inflight: None,
             release_error: None,
-            release_failed_for: None,
+            ledger: Ledger::default(),
+            ledger_error: None,
+            installed: Vec::new(),
+            installed_by_repo: HashMap::new(),
+            latest: HashMap::new(),
+            latest_errors: HashMap::new(),
+            status_inflight: HashSet::new(),
+            status_filter: StatusFilter::All,
             last_selection_change: Instant::now(),
             search_query: String::new(),
             search_buffer: String::new(),
@@ -377,7 +457,15 @@ impl UiState {
                 status: None,
             },
             last_tick: Instant::now(),
+        };
+        match Ledger::load() {
+            Ok(ledger) => {
+                state.ledger = ledger;
+                state.refresh_installed();
+            }
+            Err(error) => state.ledger_error = Some(error.to_string()),
         }
+        state
     }
 
     fn selected_repo(&self) -> Option<&crate::RepoItem> {
@@ -416,6 +504,9 @@ impl UiState {
                 }) {
                     return false;
                 }
+                if !self.status_matches(repo) {
+                    return false;
+                }
                 if query.is_empty() {
                     return true;
                 }
@@ -424,7 +515,7 @@ impl UiState {
                     || repo.description.as_deref().is_some_and(|description| {
                         description.to_ascii_lowercase().contains(&query)
                     })
-                    || repo.source.label().to_ascii_lowercase().contains(&query)
+                    || repo.display_source().to_ascii_lowercase().contains(&query)
             })
             .map(|(index, _)| index)
             .collect();
@@ -445,7 +536,6 @@ impl UiState {
         self.release = None;
         self.release_error = None;
         self.release_loading = self.release_inflight.is_some();
-        self.release_failed_for = None;
         self.focus = Focus::Repos;
     }
 
@@ -528,6 +618,102 @@ impl UiState {
             .and_then(|index| self.config.sources.get(index))
             .map_or_else(|| "all sources".to_owned(), Source::label)
     }
+
+    fn refresh_installed(&mut self) {
+        self.installed = installed_packages(&self.ledger);
+        self.installed_by_repo = self
+            .installed
+            .iter()
+            .cloned()
+            .map(|package| (package.repo.to_ascii_lowercase(), package))
+            .collect();
+    }
+
+    fn reload_ledger(&mut self) {
+        match Ledger::load() {
+            Ok(ledger) => {
+                self.ledger = ledger;
+                self.ledger_error = None;
+                self.refresh_installed();
+                self.merge_ledger_repos();
+            }
+            Err(error) => self.ledger_error = Some(error.to_string()),
+        }
+    }
+
+    /// Add synthetic repository rows for managed binaries whose source was
+    /// removed from the config. They remain visible and updateable.
+    fn merge_ledger_repos(&mut self) {
+        crate::merge_installed_repos(&mut self.repos, &self.installed);
+    }
+
+    fn installed_for(&self, repo: &crate::RepoItem) -> Option<&InstalledPackage> {
+        self.installed_by_repo
+            .get(&repo.full_name.to_ascii_lowercase())
+    }
+
+    fn latest_for(&self, repo: &crate::RepoItem) -> Option<&LatestInfo> {
+        self.latest.get(&repo.full_name.to_ascii_lowercase())
+    }
+
+    fn has_update(&self, repo: &crate::RepoItem) -> bool {
+        let Some(package) = self.installed_for(repo) else {
+            return false;
+        };
+        self.latest_for(repo).is_some_and(|latest| {
+            latest.compatible > 0 && latest.release.tag_name != package.version
+        })
+    }
+
+    fn status_matches(&self, repo: &crate::RepoItem) -> bool {
+        match self.status_filter {
+            StatusFilter::All => true,
+            StatusFilter::Installed => self.installed_for(repo).is_some(),
+            StatusFilter::Updates => self.has_update(repo),
+            StatusFilter::NotInstalled => self.installed_for(repo).is_none(),
+        }
+    }
+
+    fn status_counts(&self) -> (usize, usize, usize) {
+        let mut installed = 0usize;
+        let mut updates = 0usize;
+        let mut available = 0usize;
+        for repo in &self.repos {
+            if self.installed_for(repo).is_some() {
+                installed += 1;
+                if self.has_update(repo) {
+                    updates += 1;
+                }
+            } else {
+                available += 1;
+            }
+        }
+        (installed, updates, available)
+    }
+
+    fn cycle_status_filter(&mut self) {
+        self.status_filter = self.status_filter.next();
+        self.selected = 0;
+        self.clear_release();
+        self.rebuild_filter();
+        self.last_selection_change = Instant::now();
+    }
+
+    fn cache_release(&mut self, repo: &RepoRef, release: Release) {
+        let catalog = release::catalog_assets(self.platform, &release);
+        self.latest.insert(
+            repo.full_name().to_ascii_lowercase(),
+            LatestInfo {
+                release,
+                compatible: catalog.compatible.len(),
+            },
+        );
+    }
+
+    fn release_view_for(&mut self, repo: RepoRef, release: Release) -> ReleaseView {
+        let catalog = release::catalog_assets(self.platform, &release);
+        ReleaseView::new(repo, release, catalog)
+    }
 }
 
 struct App {
@@ -558,6 +744,7 @@ impl App {
             self.state.last_tick = now;
         }
         self.schedule_release(now);
+        self.schedule_status_prefetch();
     }
 
     fn poll_worker(&mut self) {
@@ -567,6 +754,7 @@ impl App {
                     self.state.loading_repos = false;
                     self.state.warnings = discovery.warnings.clone();
                     self.state.repos = discovery.repos;
+                    self.state.merge_ledger_repos();
                     self.state.selected = 0;
                     self.state.clear_release();
                     self.state.rebuild_filter();
@@ -578,35 +766,46 @@ impl App {
                         });
                     }
                 }
-                WorkerEvent::Release { repo, result } => {
-                    self.state.release_loading = false;
-                    self.state.release_inflight = None;
-                    let current = self.state.selected_repo_key();
-                    if current.as_deref() != Some(repo.full_name().to_ascii_lowercase().as_str()) {
-                        continue;
+                WorkerEvent::Release {
+                    repo,
+                    result,
+                    no_release,
+                } => {
+                    let key = repo.full_name().to_ascii_lowercase();
+                    self.state.status_inflight.remove(&key);
+                    let selected = self.state.selected_repo_key();
+                    let selected = selected.as_deref() == Some(key.as_str());
+                    if self.state.release_inflight.as_deref() == Some(key.as_str()) {
+                        self.state.release_loading = false;
+                        self.state.release_inflight = None;
                     }
                     match result {
                         Ok(release) => {
-                            match release::select_assets(self.state.platform, &release, None) {
-                                Ok(choices) => {
-                                    self.state.release =
-                                        Some(ReleaseView::new(repo, release, choices));
-                                    self.state.release_error = None;
-                                    self.state.release_failed_for = None;
-                                }
-                                Err(error) => {
-                                    self.state.release = None;
-                                    self.state.release_error = Some(error.to_string());
-                                    self.state.release_failed_for = current;
-                                }
+                            self.state.cache_release(&repo, release.clone());
+                            self.state.latest_errors.remove(&key);
+                            if selected {
+                                let view = self.state.release_view_for(repo, release);
+                                self.state.release = Some(view);
+                                self.state.release_error = None;
                             }
                         }
-                        Err(error) => {
-                            self.state.release = None;
-                            self.state.release_error = Some(error);
-                            self.state.release_failed_for = current;
+                        Err(message) => {
+                            let error = ReleaseError {
+                                message,
+                                kind: if no_release {
+                                    ReleaseErrorKind::NoRelease
+                                } else {
+                                    ReleaseErrorKind::Unavailable
+                                },
+                            };
+                            self.state.latest_errors.insert(key.clone(), error.clone());
+                            if selected {
+                                self.state.release = None;
+                                self.state.release_error = Some(error);
+                            }
                         }
                     }
+                    self.state.rebuild_filter();
                 }
                 WorkerEvent::Progress(event) => {
                     if let Stage::Progress(progress) = &mut self.state.stage {
@@ -616,6 +815,11 @@ impl App {
                     }
                 }
                 WorkerEvent::Installed { result } => {
+                    if result.is_ok() {
+                        self.state.reload_ledger();
+                        self.state.merge_ledger_repos();
+                        self.state.rebuild_filter();
+                    }
                     self.state.status = None;
                     self.state.stage = Stage::Outcome(OutcomeState { result });
                 }
@@ -624,31 +828,92 @@ impl App {
     }
 
     fn schedule_release(&mut self, now: Instant) {
-        if self.state.loading_repos
-            || self.state.release_loading
-            || self.state.release_inflight.is_some()
-            || self.state.release.is_some()
-        {
+        if self.state.loading_repos || self.state.release_loading || self.state.release.is_some() {
             return;
         }
         let Some(repo) = self.state.selected_repo() else {
             return;
         };
+        let repo_ref = repo.repo_ref();
         let key = repo.full_name.to_ascii_lowercase();
-        if self.state.release_failed_for.as_deref() == Some(key.as_str()) {
+
+        if let Some(info) = self.state.latest.get(&key) {
+            let view = self.state.release_view_for(repo_ref, info.release.clone());
+            self.state.release = Some(view);
+            self.state.release_error = None;
+            return;
+        }
+        if let Some(error) = self.state.latest_errors.get(&key).cloned() {
+            self.state.release_error = Some(error);
+            return;
+        }
+        if !self.state.status_inflight.insert(key.clone()) {
+            // A prefetch for this repository is already running. Adopt it as
+            // the selected request so the spinner and result are applied.
+            self.state.release_loading = true;
+            self.state.release_inflight = Some(key);
             return;
         }
         if now.duration_since(self.state.last_selection_change) < Duration::from_millis(320) {
+            self.state.status_inflight.remove(&key);
             return;
         }
         let command = Command::LoadRelease {
-            repo: repo.repo_ref(),
+            repo: repo_ref,
             include_prereleases: self.state.config.include_prereleases,
         };
         if self.worker.send(command) {
             self.state.release_loading = true;
             self.state.release_inflight = Some(key);
             self.state.release_error = None;
+        } else {
+            self.state.status_inflight.remove(&key);
+        }
+    }
+
+    /// Fetch latest release metadata for installed repositories so update
+    /// badges and the "updates" filter are meaningful without opening each one.
+    fn schedule_status_prefetch(&mut self) {
+        if self.state.loading_repos || self.state.installed.is_empty() {
+            return;
+        }
+        let selected = self.state.selected_repo_key();
+        let mut sent = 0usize;
+        let mut keys: Vec<String> = self
+            .state
+            .installed
+            .iter()
+            .map(|package| package.repo.to_ascii_lowercase())
+            .collect();
+        keys.sort();
+        keys.dedup();
+        for key in keys {
+            if sent >= 4 {
+                break;
+            }
+            if selected.as_deref() == Some(key.as_str())
+                || self.state.latest.contains_key(&key)
+                || self.state.latest_errors.contains_key(&key)
+                || self.state.status_inflight.contains(&key)
+            {
+                continue;
+            }
+            let Some(repo) = self
+                .state
+                .repos
+                .iter()
+                .find(|repo| repo.full_name.eq_ignore_ascii_case(&key))
+            else {
+                continue;
+            };
+            let command = Command::LoadRelease {
+                repo: repo.repo_ref(),
+                include_prereleases: self.state.config.include_prereleases,
+            };
+            if self.worker.send(command) {
+                self.state.status_inflight.insert(key);
+                sent += 1;
+            }
         }
     }
 
@@ -656,6 +921,9 @@ impl App {
         self.state.clear_release();
         self.state.warnings.clear();
         self.state.status = None;
+        self.state.latest.clear();
+        self.state.latest_errors.clear();
+        self.state.reload_ledger();
         self.start();
     }
 
@@ -779,6 +1047,7 @@ impl App {
                 self.state.search_active = true;
             }
             KeyCode::Char('f') => self.state.cycle_source_filter(),
+            KeyCode::Char('v') => self.state.cycle_status_filter(),
             KeyCode::Tab => {
                 if self.state.release.is_some() {
                     self.state.focus = match self.state.focus {
@@ -829,7 +1098,9 @@ impl App {
                     if self.state.release.is_some() {
                         self.state.focus = Focus::Assets;
                     } else {
-                        self.state.release_failed_for = None;
+                        if let Some(key) = self.state.selected_repo_key() {
+                            self.state.latest_errors.remove(&key);
+                        }
                         self.state.last_selection_change = Instant::now() - Duration::from_secs(1);
                     }
                 }
@@ -888,6 +1159,13 @@ impl App {
     }
 
     fn confirm_install(&mut self) {
+        if let Some(error) = &self.state.ledger_error {
+            self.state.status = Some(Status {
+                text: format!("install ledger is unavailable: {error}"),
+                level: StatusLevel::Error,
+            });
+            return;
+        }
         let Some(release) = self.state.release.as_ref() else {
             self.state.status = Some(Status {
                 text: "select a repository and wait for its release to load".to_owned(),
@@ -897,11 +1175,19 @@ impl App {
         };
         let Some(choice) = release.selected_choice() else {
             self.state.status = Some(Status {
-                text: "this release has no compatible asset".to_owned(),
+                text: format!(
+                    "no compatible asset for {}; open the release details to see available files",
+                    self.state.platform.label()
+                ),
                 level: StatusLevel::Error,
             });
             return;
         };
+        let installed_version = self
+            .state
+            .installed_by_repo
+            .get(&release.repo.full_name().to_ascii_lowercase())
+            .map(|package| package.version.clone());
         let request = InstallRequest {
             repo: release.repo.clone(),
             tag: Some(release.release.tag_name.clone()),
@@ -925,6 +1211,7 @@ impl App {
                     plan,
                     allow_unverified: false,
                     force: false,
+                    installed_version,
                 });
             }
             Err(error) => {

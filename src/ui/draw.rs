@@ -9,8 +9,8 @@ use ratatui::widgets::{Block, BorderType, Borders, Clear, Gauge, List, ListItem,
 use crate::checksum;
 use crate::format;
 use crate::ui::{
-    ConfirmState, Focus, OutcomeState, ProgressState, ReleaseView, SourceState, Stage, StatusLevel,
-    UiState,
+    ConfirmState, Focus, OutcomeState, ProgressState, ReleaseView, SourceState, Stage,
+    StatusFilter, StatusLevel, UiState,
 };
 
 const ACCENT: Color = Color::Rgb(94, 234, 212);
@@ -58,6 +58,14 @@ impl Theme {
 
     fn bad(self) -> Style {
         self.fg(BAD)
+    }
+
+    fn foreground(self) -> Style {
+        if self.color {
+            Style::default().fg(Color::Rgb(226, 232, 240))
+        } else {
+            Style::default()
+        }
     }
 
     fn bold(self) -> Style {
@@ -123,7 +131,7 @@ pub(crate) fn draw(frame: &mut Frame, state: &mut UiState) {
     let outer = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3),
+            Constraint::Length(4),
             Constraint::Min(0),
             Constraint::Length(2),
         ])
@@ -157,7 +165,7 @@ fn draw_header(frame: &mut Frame, state: &UiState, area: Rect, theme: Theme) {
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(1), Constraint::Length(1)])
         .split(inner);
-    let right_width = 30u16.min(inner.width / 2);
+    let right_width = 40u16.min(inner.width / 2);
     let top = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Min(0), Constraint::Length(right_width)])
@@ -208,20 +216,21 @@ fn draw_header(frame: &mut Frame, state: &UiState, area: Rect, theme: Theme) {
         ])),
         bottom[0],
     );
+    let (installed, updates, available) = state.status_counts();
     frame.render_widget(
         Paragraph::new(Line::from(vec![Span::styled(
             format!(
-                "{} source{} · {} repo{}",
-                state.config.sources.len(),
-                if state.config.sources.len() == 1 {
-                    ""
-                } else {
-                    "s"
-                },
-                state.repos.len(),
-                if state.repos.len() == 1 { "" } else { "s" },
+                "{} installed · {} update{} · {} available",
+                installed,
+                updates,
+                if updates == 1 { "" } else { "s" },
+                available
             ),
-            theme.dim(),
+            if updates > 0 {
+                theme.warn()
+            } else {
+                theme.dim()
+            },
         )]))
         .alignment(Alignment::Right),
         bottom[1],
@@ -248,12 +257,192 @@ fn draw_body(frame: &mut Frame, state: &mut UiState, area: Rect, theme: Theme) {
     }
 }
 
+struct StatusChip {
+    text: String,
+    style: Style,
+}
+
+fn status_chip(
+    state: &UiState,
+    repo: &crate::RepoItem,
+    max_width: usize,
+    theme: Theme,
+) -> StatusChip {
+    let installed = state.installed_for(repo);
+    let latest = state.latest_for(repo);
+    let key = repo.full_name.to_ascii_lowercase();
+    let checking = state.status_inflight.contains(&key);
+    let full = if let Some(package) = installed {
+        if !package.present {
+            format!("! missing {}", package.version)
+        } else if let Some(latest) = latest {
+            if latest.compatible == 0 {
+                format!("! {} · no compatible latest", package.version)
+            } else if latest.release.tag_name != package.version {
+                format!("↑ {} → {}", package.version, latest.release.tag_name)
+            } else {
+                format!("✓ {}", package.version)
+            }
+        } else if checking {
+            format!("✓ {} …", package.version)
+        } else {
+            format!("✓ {}", package.version)
+        }
+    } else if let Some(latest) = latest {
+        if latest.compatible == 0 {
+            "! no compatible asset".to_owned()
+        } else {
+            format!("○ not installed · {}", latest.release.tag_name)
+        }
+    } else if checking {
+        "○ checking…".to_owned()
+    } else {
+        "○ not installed".to_owned()
+    };
+    let short = if let Some(package) = installed {
+        if !package.present {
+            format!("! {}", package.version)
+        } else if latest.is_some_and(|latest| {
+            latest.compatible == 0 || latest.release.tag_name != package.version
+        }) {
+            format!("↑ {}", package.version)
+        } else {
+            format!("✓ {}", package.version)
+        }
+    } else if latest.is_some_and(|latest| latest.compatible == 0) {
+        "!".to_owned()
+    } else {
+        "○".to_owned()
+    };
+    let warn = installed.is_some_and(|package| !package.present)
+        || latest.is_some_and(|latest| latest.compatible == 0)
+        || state.has_update(repo);
+    let style = if warn {
+        theme.warn()
+    } else if installed.is_some() {
+        theme.good()
+    } else {
+        theme.dim()
+    };
+    let text = if format::width(&full) <= max_width {
+        full
+    } else if format::width(&short) <= max_width {
+        short
+    } else if installed.is_some() {
+        "✓".to_owned()
+    } else {
+        "○".to_owned()
+    };
+    StatusChip { text, style }
+}
+
+fn install_summary(state: &UiState, theme: Theme) -> Vec<Line<'static>> {
+    let Some(repo) = state.selected_repo() else {
+        return vec![Line::from(Span::styled(
+            "Select a repository to see install status.",
+            theme.dim(),
+        ))];
+    };
+    let key = repo.full_name.to_ascii_lowercase();
+    let installed = state.installed_for(repo);
+    let latest = state.latest_for(repo);
+    let checking = state.status_inflight.contains(&key);
+    let failed = state.latest_errors.contains_key(&key);
+    let mut lines = Vec::new();
+    let mut status = vec![Span::styled("status   ", theme.dim())];
+    if let Some(package) = installed {
+        if package.present {
+            status.push(Span::styled("installed ", theme.good()));
+        } else {
+            status.push(Span::styled("missing ", theme.warn()));
+        }
+        status.push(Span::styled(package.version.clone(), theme.bold()));
+        if let Some(latest) = latest {
+            if latest.compatible == 0 {
+                status.push(Span::styled(
+                    format!(
+                        "  ·  latest {} has no compatible asset",
+                        latest.release.tag_name
+                    ),
+                    theme.warn(),
+                ));
+            } else if latest.release.tag_name != package.version {
+                status.push(Span::styled("  →  ", theme.dim()));
+                status.push(Span::styled(
+                    latest.release.tag_name.clone(),
+                    theme.accent(),
+                ));
+                status.push(Span::styled(" available", theme.warn()));
+            } else {
+                status.push(Span::styled("  ·  up to date", theme.good()));
+            }
+        } else if checking {
+            status.push(Span::styled("  ·  checking latest…", theme.dim()));
+        } else if failed {
+            status.push(Span::styled("  ·  latest unavailable", theme.dim()));
+        }
+    } else {
+        status.push(Span::styled("not installed", theme.dim()));
+        if let Some(latest) = latest {
+            if latest.compatible == 0 {
+                status.push(Span::styled(
+                    format!(
+                        "  ·  latest {} has no compatible asset",
+                        latest.release.tag_name
+                    ),
+                    theme.warn(),
+                ));
+            } else {
+                status.push(Span::styled(
+                    format!("  ·  latest {}", latest.release.tag_name),
+                    theme.dim(),
+                ));
+            }
+        } else if checking {
+            status.push(Span::styled("  ·  checking latest…", theme.dim()));
+        }
+    }
+    lines.push(Line::from(status));
+    if let Some(package) = installed {
+        let mut path = vec![
+            Span::styled("path     ", theme.dim()),
+            Span::styled(
+                format::sanitize(&package.display_path()),
+                if package.present {
+                    theme.foreground()
+                } else {
+                    theme.warn()
+                },
+            ),
+        ];
+        if package.binaries > 1 {
+            path.push(Span::styled(
+                format!("  ·  {} binaries", package.binaries),
+                theme.dim(),
+            ));
+        }
+        if !package.present {
+            path.push(Span::styled("  ·  file is missing", theme.warn()));
+        }
+        lines.push(Line::from(path));
+        lines.push(Line::from(vec![
+            Span::styled("installed ", theme.dim()),
+            Span::styled(
+                format!("{} UTC", format::unix_datetime(package.installed_at)),
+                theme.dim(),
+            ),
+        ]));
+    }
+    lines
+}
+
 fn draw_repo_panel(frame: &mut Frame, state: &mut UiState, area: Rect, theme: Theme) {
     let filter = state.source_filter_label();
     let title = format!(
-        " repositories · {}/{} · {} ",
+        " repositories · {}/{} · {} · {} ",
         state.filtered.len(),
         state.repos.len(),
+        state.status_filter.label(),
         filter
     );
     let block = Block::default()
@@ -290,10 +479,20 @@ fn draw_repo_panel(frame: &mut Frame, state: &mut UiState, area: Rect, theme: Th
         let inner = block.inner(area);
         frame.render_widget(block, area);
         if !inner.is_empty() {
+            let checking_updates = state.status_filter == StatusFilter::Updates
+                && state.repos.iter().any(|repo| {
+                    state.installed_for(repo).is_some()
+                        && state.latest_for(repo).is_none()
+                        && !state
+                            .latest_errors
+                            .contains_key(&repo.full_name.to_ascii_lowercase())
+                });
             let text = if state.repos.is_empty() {
                 "No repositories found.\n\nPress s to add an org or repo source."
+            } else if checking_updates {
+                "Checking installed repositories for updates…"
             } else {
-                "No repositories match this filter.\n\nPress / to search, f to change source, Esc to clear."
+                "No repositories match this filter.\n\nPress / to search, v for status, f for source, Esc to clear."
             };
             frame.render_widget(
                 Paragraph::new(Span::styled(text, theme.dim()))
@@ -304,22 +503,69 @@ fn draw_repo_panel(frame: &mut Frame, state: &mut UiState, area: Rect, theme: Th
         }
         return;
     }
+    let inner_width = usize::from(area.width.saturating_sub(2));
     let items: Vec<ListItem<'_>> = state
         .filtered
         .iter()
         .filter_map(|index| state.repos.get(*index))
         .map(|repo| {
-            let mut spans = vec![
-                Span::styled("● ", theme.accent()),
-                Span::styled(format::sanitize(&repo.full_name), theme.bold()),
-                Span::styled(format!("  {}", repo.source.label()), theme.dim()),
-            ];
+            let marker = if repo.installed_only { "◆ " } else { "● " };
+            let chip = status_chip(state, repo, inner_width / 3, theme);
+            let status = format::sanitize(&chip.text);
+            let status_width = format::width(&status);
+            let marker_width = 2usize;
+            let highlight_width = 2usize;
+            let gap = 1usize;
+            let content_width =
+                inner_width.saturating_sub(marker_width + highlight_width + gap + status_width);
+            let source_text = format!("  {}", repo.display_source());
+            let mut source_width = format::width(&source_text);
+            let mut tags: Vec<(String, Style)> = Vec::new();
+            let mut tags_width = 0usize;
             if repo.archived {
-                spans.push(Span::styled("  archived", theme.warn()));
+                tags.push(("  archived".to_owned(), theme.warn()));
+                tags_width += "  archived".len();
             }
             if repo.fork {
-                spans.push(Span::styled("  fork", theme.dim()));
+                tags.push(("  fork".to_owned(), theme.dim()));
+                tags_width += "  fork".len();
             }
+            while !tags.is_empty()
+                && content_width < 8usize.saturating_add(source_width + tags_width)
+            {
+                if let Some((text, _)) = tags.pop() {
+                    tags_width = tags_width.saturating_sub(text.len());
+                }
+            }
+            if content_width < 8usize.saturating_add(source_width) {
+                source_width = 0;
+            }
+            let name_width = content_width
+                .saturating_sub(source_width.saturating_add(tags_width))
+                .max(4);
+            let clean_name = format::sanitize(&repo.full_name);
+            let name = format::truncate(&clean_name, name_width);
+            let used = marker_width + format::width(&name) + source_width + tags_width;
+            let pad = inner_width.saturating_sub(highlight_width + used + status_width);
+            let mut spans = vec![
+                Span::styled(
+                    marker,
+                    if repo.installed_only {
+                        theme.title()
+                    } else {
+                        theme.accent()
+                    },
+                ),
+                Span::styled(name.into_owned(), theme.bold()),
+            ];
+            if source_width > 0 {
+                spans.push(Span::styled(source_text, theme.dim()));
+            }
+            for (text, style) in tags {
+                spans.push(Span::styled(text, style));
+            }
+            spans.push(Span::raw(" ".repeat(pad)));
+            spans.push(Span::styled(status, chip.style));
             ListItem::new(Line::from(spans))
         })
         .collect();
@@ -341,87 +587,123 @@ fn draw_detail_panel(frame: &mut Frame, state: &mut UiState, area: Rect, theme: 
             theme.border()
         })
         .title(Span::styled(" details ", theme.title()));
+    let install_lines = install_summary(state, theme);
+
     if state.release_loading {
         let inner = block.inner(area);
         frame.render_widget(block, area);
         if !inner.is_empty() {
-            frame.render_widget(
-                Paragraph::new(vec![
-                    Line::from(Span::styled(
-                        format!("{} loading latest release…", spinner(state.spinner)),
-                        theme.accent(),
-                    )),
-                    Line::from(Span::styled(
-                        "resolving platform assets and checksum sources",
-                        theme.dim(),
-                    )),
-                ])
-                .wrap(Wrap { trim: true }),
-                inner,
-            );
+            let mut lines = install_lines;
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                format!("{} loading latest release…", spinner(state.spinner)),
+                theme.accent(),
+            )));
+            lines.push(Line::from(Span::styled(
+                "resolving platform assets and checksum sources",
+                theme.dim(),
+            )));
+            frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), inner);
         }
         return;
     }
+
     if let Some(error) = &state.release_error {
         let inner = block.inner(area);
         frame.render_widget(block, area);
         if !inner.is_empty() {
-            frame.render_widget(
-                Paragraph::new(vec![
-                    Line::from(Span::styled("could not load release", theme.bad())),
-                    Line::from(""),
-                    Line::from(Span::styled(format::sanitize(error), theme.dim())),
-                    Line::from(""),
-                    Line::from(Span::styled(
-                        "Press r to retry, or check the source with `harbor doctor`.",
-                        theme.dim(),
-                    )),
-                ])
-                .wrap(Wrap { trim: true }),
-                inner,
-            );
+            let no_release = error.kind == crate::ui::ReleaseErrorKind::NoRelease;
+            let mut lines = install_lines;
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                if no_release {
+                    "no installable release"
+                } else {
+                    "release unavailable"
+                },
+                if no_release {
+                    theme.warn().add_modifier(Modifier::BOLD)
+                } else {
+                    theme.bad().add_modifier(Modifier::BOLD)
+                },
+            )));
+            lines.push(Line::from(Span::styled(
+                format::sanitize(&error.message),
+                theme.dim(),
+            )));
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                if no_release {
+                    "This repository has no usable release yet. You can still install a specific tag with `harbor install owner/repo --tag ...`, or enable include_prereleases in the config."
+                } else {
+                    "Press Enter to retry, or check the source with `harbor doctor`."
+                },
+                theme.dim(),
+            )));
+            frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), inner);
         }
         return;
     }
+
     let description = state
         .selected_repo()
         .and_then(|repo| repo.description.clone());
     let bin_dir = state.bin_dir.clone();
+    let platform = state.platform;
     let Some(release) = state.release.as_mut() else {
         let inner = block.inner(area);
         frame.render_widget(block, area);
         if !inner.is_empty() {
-            let text = if let Some(repo) = state.selected_repo() {
-                format!(
-                    "{}\n\n{}\n\nPress Enter to load the latest release.",
-                    repo.full_name,
-                    repo.description.as_deref().unwrap_or("No description.")
-                )
-            } else {
-                "Select a repository to inspect its latest release.".to_owned()
-            };
-            frame.render_widget(
-                Paragraph::new(Span::styled(format::sanitize(&text), theme.dim()))
-                    .wrap(Wrap { trim: true }),
-                inner,
-            );
+            let mut lines = install_lines;
+            if let Some(repo) = state.selected_repo() {
+                lines.push(Line::from(""));
+                lines.push(Line::from(Span::styled(
+                    format::sanitize(&repo.full_name),
+                    theme.title(),
+                )));
+                lines.push(Line::from(Span::styled(
+                    format::sanitize(repo.description.as_deref().unwrap_or("No description.")),
+                    theme.dim(),
+                )));
+                lines.push(Line::from(""));
+                lines.push(Line::from(Span::styled(
+                    "Press Enter to load the latest release.",
+                    theme.dim(),
+                )));
+            }
+            frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), inner);
         }
         return;
     };
-    let summary = release_summary(release, description.as_deref(), &bin_dir, theme);
+
+    let mut summary = install_lines;
+    summary.push(Line::from(""));
+    summary.extend(release_summary(
+        release,
+        description.as_deref(),
+        &bin_dir,
+        platform,
+        theme,
+    ));
+    let inner = block.inner(area);
+    let summary_h = u16::try_from(summary.len())
+        .unwrap_or(u16::MAX)
+        .min(inner.height.saturating_sub(3))
+        .max(4);
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(7), Constraint::Min(0)])
-        .split(block.inner(area));
+        .constraints([Constraint::Length(summary_h), Constraint::Min(0)])
+        .split(inner);
     frame.render_widget(block, area);
     frame.render_widget(Paragraph::new(summary).wrap(Wrap { trim: true }), chunks[0]);
-    draw_asset_list(frame, release, chunks[1], theme);
+    draw_asset_list(frame, release, chunks[1], platform, theme);
 }
 
 fn release_summary(
     release: &ReleaseView,
     description: Option<&str>,
     bin_dir: &crate::platform::BinDir,
+    platform: crate::platform::Platform,
     theme: Theme,
 ) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
@@ -473,6 +755,18 @@ fn release_summary(
                 theme.dim(),
             ),
         ]));
+    } else {
+        lines.push(Line::from(vec![
+            Span::styled("assets   ", theme.dim()),
+            Span::styled(
+                format!("no compatible asset for {}", platform.label()),
+                theme.warn(),
+            ),
+            Span::styled(
+                format!("   {} other-platform asset(s)", release.others.len()),
+                theme.dim(),
+            ),
+        ]));
     }
     lines.push(Line::from(vec![
         Span::styled("install ", theme.dim()),
@@ -496,19 +790,74 @@ fn release_summary(
     lines
 }
 
-fn draw_asset_list(frame: &mut Frame, release: &mut ReleaseView, area: Rect, theme: Theme) {
+fn draw_asset_list(
+    frame: &mut Frame,
+    release: &mut ReleaseView,
+    area: Rect,
+    platform: crate::platform::Platform,
+    theme: Theme,
+) {
     if area.is_empty() {
         return;
     }
+    let title = if release.choices.is_empty() {
+        " assets · no compatible asset ".to_owned()
+    } else if release.others.is_empty() {
+        format!(" assets · {} compatible ", release.choices.len())
+    } else {
+        format!(
+            " assets · {} compatible · {} other ",
+            release.choices.len(),
+            release.others.len()
+        )
+    };
     let block = Block::default()
         .borders(Borders::TOP)
         .border_style(theme.border())
-        .title(Span::styled(
-            format!(" assets · {} compatible ", release.choices.len()),
-            theme.dim(),
-        ));
+        .title(Span::styled(title, theme.dim()));
     if release.choices.is_empty() {
+        let inner = block.inner(area);
         frame.render_widget(block, area);
+        if inner.is_empty() {
+            return;
+        }
+        let mut lines = vec![Line::from(Span::styled(
+            format!("No compatible asset for {}.", platform.label()),
+            theme.warn(),
+        ))];
+        if release.others.is_empty() {
+            lines.push(Line::from(Span::styled(
+                "This release publishes no supported archive or binary.",
+                theme.dim(),
+            )));
+        } else {
+            lines.push(Line::from(Span::styled(
+                "This release exists, but its published files target other systems:",
+                theme.dim(),
+            )));
+            lines.push(Line::from(""));
+            for choice in release
+                .others
+                .iter()
+                .take(usize::from(inner.height.saturating_sub(4)))
+            {
+                let reason = crate::release::incompatibility(platform, &choice.asset.name)
+                    .unwrap_or("not compatible");
+                lines.push(Line::from(vec![
+                    Span::styled("  × ", theme.dim()),
+                    Span::styled(
+                        format::truncate(
+                            &format::sanitize(&choice.asset.name),
+                            usize::from(inner.width.saturating_sub(22)),
+                        )
+                        .into_owned(),
+                        theme.dim(),
+                    ),
+                    Span::styled(format!("  {reason}"), theme.warn()),
+                ]));
+            }
+        }
+        frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), inner);
         return;
     }
     let inner = block.inner(area);
@@ -548,10 +897,10 @@ fn draw_footer(frame: &mut Frame, state: &UiState, area: Rect, theme: Theme) {
         match &state.stage {
             Stage::Browse => match state.focus {
                 Focus::Repos => {
-                    "↑↓ move  Enter release  i install  Tab assets  / search  f source  s sources  r refresh  ? help  q quit"
+                    "↑↓ move  Enter release  i install  Tab assets  / search  v status  f source  s sources  r refresh  ? help  q quit"
                 }
                 Focus::Assets => {
-                    "↑↓ asset  Enter install  i install  Tab repos  Esc back  / search  s sources  ? help  q quit"
+                    "↑↓ asset  Enter install  i install  Tab repos  Esc back  / search  v status  s sources  ? help  q quit"
                 }
             },
             Stage::Confirm(_) => "Enter install  u allow unverified  o overwrite  Esc cancel",
@@ -585,9 +934,16 @@ fn draw_footer(frame: &mut Frame, state: &UiState, area: Rect, theme: Theme) {
         Line::from(Span::styled(format::sanitize(&status.text), style))
     } else if let Some(warning) = state.warnings.first() {
         Line::from(Span::styled(format::sanitize(warning), theme.warn()))
+    } else if let Some(error) = &state.ledger_error {
+        Line::from(Span::styled(
+            format!("install ledger: {}", format::sanitize(error)),
+            theme.warn(),
+        ))
     } else {
         Line::from(vec![
-            Span::styled("source ", theme.dim()),
+            Span::styled("status ", theme.dim()),
+            Span::styled(state.status_filter.label(), theme.accent()),
+            Span::styled("   source ", theme.dim()),
             Span::styled(state.source_filter_label(), theme.accent()),
             Span::styled("   ", theme.dim()),
             Span::styled(
@@ -643,11 +999,16 @@ fn center_rect(area: Rect, width: u16, height: u16) -> Rect {
 }
 
 fn draw_confirm(frame: &mut Frame, confirm: &ConfirmState, theme: Theme) {
-    let inner = modal(frame, 76, 15, "confirm install", theme);
+    let plan = &confirm.plan;
+    let action = match &confirm.installed_version {
+        None => "confirm install",
+        Some(current) if current == &plan.release.tag_name => "confirm reinstall",
+        Some(_) => "confirm update",
+    };
+    let inner = modal(frame, 76, 16, action, theme);
     if inner.is_empty() {
         return;
     }
-    let plan = &confirm.plan;
     let mut lines = vec![
         Line::from(vec![
             Span::styled("repository ", theme.dim()),
@@ -658,6 +1019,22 @@ fn draw_confirm(frame: &mut Frame, confirm: &ConfirmState, theme: Theme) {
             Span::styled(format::sanitize(&plan.release.tag_name), theme.accent()),
             Span::styled(format!("  ({})", plan.release.date()), theme.dim()),
         ]),
+    ];
+    if let Some(current) = &confirm.installed_version {
+        lines.push(Line::from(vec![
+            Span::styled("installed  ", theme.dim()),
+            Span::styled(format::sanitize(current), theme.good()),
+            if current == &plan.release.tag_name {
+                Span::styled("  ·  same version (reinstall)", theme.dim())
+            } else {
+                Span::styled(
+                    format!("  →  {}", format::sanitize(&plan.release.tag_name)),
+                    theme.warn(),
+                )
+            },
+        ]));
+    }
+    lines.extend(vec![
         Line::from(vec![
             Span::styled("asset      ", theme.dim()),
             Span::styled(
@@ -689,7 +1066,7 @@ fn draw_confirm(frame: &mut Frame, confirm: &ConfirmState, theme: Theme) {
             ),
         ]),
         Line::from(""),
-    ];
+    ]);
     if !plan.checksum_available() {
         lines.push(Line::from(Span::styled(
             if confirm.allow_unverified {
@@ -970,10 +1347,21 @@ fn draw_help(frame: &mut Frame, theme: Theme) {
         Line::from(""),
         Line::from(Span::styled("browsing", theme.title())),
         Line::from(Span::styled(
-            "  / search   f cycle source   s sources   r refresh   ? help   q quit",
+            "  / search   v status   f source   s sources   r refresh   ? help   q quit",
             theme.dim(),
         )),
-        Line::from(Span::styled("  i install the selected asset", theme.dim())),
+        Line::from(Span::styled(
+            "  v cycles: all / installed / updates / not installed",
+            theme.dim(),
+        )),
+        Line::from(Span::styled(
+            "  rows show installed version, update availability and missing files",
+            theme.dim(),
+        )),
+        Line::from(Span::styled(
+            "  i install, update or reinstall the selected asset",
+            theme.dim(),
+        )),
         Line::from(""),
         Line::from(Span::styled("safety", theme.title())),
         Line::from(Span::styled(
@@ -1014,10 +1402,13 @@ mod tests {
 
     use crate::config::Config;
     use crate::github::{Asset, Release, RepoRef};
-    use crate::install::InstallOutcome;
+    use crate::install::{InstallOutcome, InstalledPackage, Ledger};
     use crate::platform::{BinDir, Platform};
     use crate::release::{AssetChoice, AssetKind};
-    use crate::ui::{Focus, OutcomeState, Stage, UiState};
+    use crate::ui::{
+        Focus, LatestInfo, OutcomeState, ReleaseError, ReleaseErrorKind, Stage, StatusFilter,
+        UiState,
+    };
 
     use super::*;
 
@@ -1057,15 +1448,53 @@ mod tests {
             PathBuf::from("/tmp/harbor-config.toml"),
         );
         state.loading_repos = false;
-        state.repos = vec![crate::RepoItem {
-            source: crate::Source::org("summertools").unwrap(),
-            full_name: "summertools/rtop".to_owned(),
-            name: "rtop".to_owned(),
-            description: Some("A terminal system monitor".to_owned()),
-            archived: false,
-            fork: false,
-            html_url: None,
-        }];
+        state.ledger = Ledger::default();
+        state.ledger_error = None;
+        state.latest_errors.clear();
+        state.status_inflight.clear();
+        state.repos = vec![
+            crate::RepoItem {
+                source: crate::Source::org("summertools").unwrap(),
+                full_name: "summertools/rtop".to_owned(),
+                name: "rtop".to_owned(),
+                description: Some("A terminal system monitor".to_owned()),
+                archived: false,
+                fork: false,
+                html_url: None,
+                installed_only: false,
+            },
+            crate::RepoItem {
+                source: crate::Source::org("summertools").unwrap(),
+                full_name: "summertools/dulens".to_owned(),
+                name: "dulens".to_owned(),
+                description: Some("A disk usage explorer".to_owned()),
+                archived: false,
+                fork: false,
+                html_url: None,
+                installed_only: false,
+            },
+        ];
+        let package = InstalledPackage {
+            repo: "summertools/rtop".to_owned(),
+            version: "v1.0.0".to_owned(),
+            path: PathBuf::from("/tmp/harbor-bin/rtop"),
+            bin_dir: PathBuf::from("/tmp/harbor-bin"),
+            installed_at: 1_700_000_000,
+            binaries: 1,
+            present: true,
+        };
+        state.installed = vec![package.clone()];
+        state.installed_by_repo.clear();
+        state
+            .installed_by_repo
+            .insert("summertools/rtop".to_owned(), package);
+        state.latest.insert(
+            "summertools/rtop".to_owned(),
+            LatestInfo {
+                release: release(),
+                compatible: 1,
+            },
+        );
         state.rebuild_filter();
         let choice = AssetChoice {
             asset: asset("rtop-v1.2.3-x86_64-unknown-linux-musl.tar.gz"),
@@ -1079,7 +1508,10 @@ mod tests {
                 name: "rtop".to_owned(),
             },
             release(),
-            vec![choice],
+            crate::release::AssetCatalog {
+                compatible: vec![choice],
+                incompatible: Vec::new(),
+            },
         ));
         state.focus = Focus::Repos;
         state
@@ -1106,7 +1538,10 @@ mod tests {
             release.release.body = Some("body\u{1b}]0;title\u{7}".to_owned());
             release.choices[0].asset.name = "tool\u{202e}.tar.gz".to_owned();
         }
-        state.release_error = Some("error\u{1b}[31m".to_owned());
+        state.release_error = Some(crate::ui::ReleaseError {
+            message: "error\u{1b}[31m".to_owned(),
+            kind: crate::ui::ReleaseErrorKind::Unavailable,
+        });
         let text = render(&mut state, 100, 30);
         assert!(!text.contains('\u{1b}'), "escape leaked: {text:?}");
         assert!(!text.contains('\u{202e}'), "bidi leaked: {text:?}");
@@ -1172,6 +1607,75 @@ mod tests {
     }
 
     #[test]
+    fn status_filters_and_badges_show_installed_and_available() {
+        let mut state = state();
+        let text = render(&mut state, 120, 34);
+        assert!(text.contains("↑ v1.0.0"), "update badge missing: {text}");
+        assert!(
+            text.contains("not installed"),
+            "available badge missing: {text}"
+        );
+        assert!(text.contains("1 installed"), "header count missing: {text}");
+
+        state.status_filter = StatusFilter::Installed;
+        state.rebuild_filter();
+        assert_eq!(state.filtered.len(), 1);
+        assert_eq!(state.selected_repo().unwrap().full_name, "summertools/rtop");
+
+        state.status_filter = StatusFilter::Updates;
+        state.rebuild_filter();
+        assert_eq!(state.filtered.len(), 1);
+
+        state.status_filter = StatusFilter::NotInstalled;
+        state.rebuild_filter();
+        assert_eq!(state.filtered.len(), 1);
+        assert_eq!(
+            state.selected_repo().unwrap().full_name,
+            "summertools/dulens"
+        );
+    }
+
+    #[test]
+    fn incompatible_release_assets_are_explained_not_treated_as_load_failure() {
+        let mut state = state();
+        let choice = AssetChoice {
+            asset: asset("rtop-macos-aarch64.tar.gz"),
+            kind: AssetKind::TarGz,
+            score: -100,
+            explicit: false,
+        };
+        state.release = Some(ReleaseView::new(
+            RepoRef {
+                owner: "summertools".to_owned(),
+                name: "rtop".to_owned(),
+            },
+            release(),
+            crate::release::AssetCatalog {
+                compatible: Vec::new(),
+                incompatible: vec![choice],
+            },
+        ));
+        state.release_error = None;
+        let text = render(&mut state, 120, 36);
+        assert!(text.contains("No compatible asset"), "{text}");
+        assert!(text.contains("different operating"), "{text}");
+        assert!(!text.contains("release unavailable"), "{text}");
+    }
+
+    #[test]
+    fn missing_release_uses_a_distinct_message() {
+        let mut state = state();
+        state.release = None;
+        state.release_error = Some(ReleaseError {
+            message: "no stable release".to_owned(),
+            kind: ReleaseErrorKind::NoRelease,
+        });
+        let text = render(&mut state, 100, 30);
+        assert!(text.contains("no installable release"), "{text}");
+        assert!(!text.contains("release unavailable"), "{text}");
+    }
+
+    #[test]
     fn common_terminal_sizes_render_without_panicking() {
         let mut state = state();
         for (width, height) in [(54, 14), (80, 24), (120, 36), (200, 60)] {
@@ -1230,6 +1734,7 @@ mod tests {
             plan,
             allow_unverified: false,
             force: false,
+            installed_version: None,
         });
         let confirm = render(&mut state, 100, 34);
         assert!(confirm.contains("confirm install"));

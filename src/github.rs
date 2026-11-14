@@ -277,7 +277,7 @@ impl GitHubClient {
                 .find(|release| !release.draft && !release.prerelease)
         };
         release.ok_or_else(|| {
-            Error::NotFound(format!(
+            Error::NoRelease(format!(
                 "{} has no {}release; enable include_prereleases or choose a tag explicitly",
                 repo.full_name(),
                 if include_prereleases {

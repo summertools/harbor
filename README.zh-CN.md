@@ -16,18 +16,17 @@ CPU 架构的包，校验 SHA-256，在不信任压缩包路径的前提下安�
 
 ```text
   harbor  safe release installer · GitHub releases                  linux-aarch64-gnu
-  bin ~/.local/bin  on PATH                    4 sources · 12 repos
+  bin ~/.local/bin  on PATH                    2 installed · 1 update · 3 available
 
-╭─ repositories · 4/4 · all sources ─────────────────╮╭─ details ───────────────────────────────╮
-│› ● summertools/dulens    org:summertools           ││ summertools/dulens · dulens v0.2.0      │
-│  ● summertools/mdtui     org:summertools           ││ Explore disk usage with a readable tree │
-│  ● summertools/rscreen   org:summertools           ││ release v0.2.0  2026-11-11              │
-│  ● summertools/rtop      org:summertools           ││ checksum SHA-256 published  1021 KiB    │
-│                                                    ││ install  ~/.local/bin  on PATH          │
-│                                                    ││ assets · 1 compatible                   │
-│                                                    ││ › tar.gz dulens-v0.2.0-aarch64...       │
-╰────────────────────────────────────────────────────╯╰─────────────────────────────────────────╯
- ↑↓ move  Enter release  i install  Tab assets  / search  f source  s sources  r refresh  ? help  q quit
+╭─ repositories · 5/5 · all · all sources ─────────────────╮╭─ details ───────────────────────────────╮
+│› ● summertools/dulens    org:summertools  ✓ v0.2.0        ││status   installed v0.2.0 · up to date    │
+│  ● summertools/harbor    org:summertools  ○               ││path     ~/.local/bin/dulens              │
+│  ● summertools/mdtui     org:summertools  ↑ v0.0.1        ││installed 2026-11-11 10:26 UTC            │
+│  ● summertools/rscreen   org:summertools  ○               ││release v0.2.0  2026-11-11                │
+│  ● summertools/rtop      org:summertools  ○               ││checksum SHA-256 published  1021 KiB      │
+│                                                            ││assets · 1 compatible · 3 other           │
+╰────────────────────────────────────────────────────────────╯╰─────────────────────────────────────────╯
+ ↑↓ move  Enter release  i install  Tab assets  / search  v status  f source  s sources  r refresh  ? help  q quit
 ```
 
 ## 特性
@@ -40,8 +39,9 @@ CPU 架构的包，校验 SHA-256，在不信任压缩包路径的前提下安�
 - **安全解包**：支持 `.tar.gz`、`.tgz`、`.tar`、`.zip` 和裸二进制；拒绝绝对路径、
   `..`、符号链接、硬链接、设备文件和 FIFO。
 - **原子安装**：同目录暂存文件、`sync`、`0755` 权限、重命名替换；失败时恢复旧文件。
-- **安装清单**：记录受管理文件。更新和覆盖只作用于 harbor 安装的文件；外部文件
-  必须使用 `--force` 或 UI 中的显式覆盖开关。
+- **安装清单与状态总览**：每个仓库行显示 `✓ 已安装 vX`、`↑ 可更新 vX → vY`、
+  `! 文件缺失`、`! 无兼容资产` 或 `○ 未安装`；顶部统计已安装、可更新和未安装数量。
+  外部文件必须使用 `--force` 或 UI 中的显式覆盖开关。
 - **精致的 ratatui 界面**：搜索、源过滤、资产选择、实时进度、确认页和源管理器。
 - **可脚本化 CLI**：JSON 输出、dry-run、指定 tag、资产 glob、压缩包内二进制选择、
   非交互 `--yes`。
@@ -71,12 +71,18 @@ harbor install dulens
 # 直接安装任意 GitHub 仓库
 harbor install BurntSushi/ripgrep --yes
 
+# 查看已安装版本、更新状态和安装路径
+harbor status
+harbor status --offline
+
 # 添加自定义组织或仓库到持久配置
 harbor source add org rust-lang
 harbor source add repo BurntSushi/ripgrep
 
 # 安装前先查看
 harbor list
+harbor list --installed
+harbor list --available
 harbor releases rtop
 harbor install rtop --dry-run
 ```
@@ -98,6 +104,7 @@ harbor install rtop --dry-run
 | `/` | 实时搜索仓库 |
 | `Enter` / `Esc` | 应用 / 取消搜索 |
 | `Ctrl+U` | 清空搜索 |
+| `v` | 循环切换状态过滤：全部 / 已安装 / 可更新 / 未安装 |
 | `f` | 循环切换源过滤 |
 | `s` | 管理源 |
 | `r` | 刷新仓库 |
@@ -113,6 +120,27 @@ harbor install rtop --dry-run
 | `o` | 允许覆盖非 harbor 管理的文件 |
 | `Esc` / `n` | 取消 |
 
+### 已安装状态
+
+每个仓库行右侧都有紧凑状态标记：
+
+| 标记 | 含义 |
+| --- | --- |
+| `✓ vX` | 已安装；获取到最新版本后也会显示是否最新 |
+| `↑ vX → vY` | 已安装版本与最新 Release 不同 |
+| `! 缺失 vX` | 清单记录为已安装，但可执行文件已不存在 |
+| `! 无兼容资产` | 最新 Release 没有当前平台的资产 |
+| `○ 未安装` | 没有受管理的安装记录 |
+| `○ 检查中…` | 正在获取最新 Release 信息 |
+
+顶部显示 `已安装数量 · 可更新数量 · 未安装数量`。按 `v` 在全部、已安装、可更新、
+未安装之间切换列表过滤器。详情面板会显示已安装版本、可执行文件路径、安装时间、
+更新状态，以及平台不兼容的具体原因。
+
+如果 Release 存在但只提供其他系统的资产，harbor 会保留该 Release，列出这些资产并
+说明“架构不同”或“操作系统不同”，同时禁用安装，而不是误报“加载 Release 失败”。
+没有任何可用 Release 的仓库会显示独立的 **没有可安装 Release** 状态。
+
 源管理器接受 `org:name`、`repo:owner/name`、`org name`、`repo owner/name` 或
 裸 `owner/repo`。修改会原子写入配置文件。
 
@@ -125,7 +153,8 @@ harbor [--config FILE] [--bin-dir DIR] [--no-color] [--quiet] [--json] [COMMAND]
 | 命令 | 用途 |
 | --- | --- |
 | `harbor` / `harbor tui` | 交互式浏览器 |
-| `harbor list [--source S] [--all]` | 列出已配置源下的仓库 |
+| `harbor list [--source S] [--all] [--installed\|--available]` | 列出仓库及其安装状态 |
+| `harbor status [--offline]` | 显示已安装版本、最新版本、更新状态和路径 |
 | `harbor releases <repo> [--tag T] [--limit N]` | 列出 Release 和兼容资产 |
 | `harbor install <repo>` | 解析、校验并安装 |
 | `harbor update` | 根据安装清单更新 |
@@ -159,7 +188,8 @@ harbor install owner/repo \
 | `--dry-run` | 只解析并打印计划，不下载 |
 
 `--json` 时，`install` 和 `update` 会在 stdout 输出机器可读结果，进度信息走
-stderr。`list`、`releases`、`source list` 和 `doctor` 也支持 `--json`。
+stderr。`list`、`status`、`releases`、`source list` 和 `doctor` 也支持 `--json`。
+`harbor status --offline` 不需要网络，只读取安装清单。
 
 ## 源与配置
 

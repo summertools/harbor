@@ -216,6 +216,48 @@ fn relative_config_paths_are_supported() {
 }
 
 #[test]
+fn status_offline_reports_installed_versions() {
+    let temp = temp_env();
+    let bin_dir = temp.path().join("bin");
+    fs::create_dir_all(&bin_dir).unwrap();
+    let binary = bin_dir.join("tool");
+    fs::write(&binary, "binary").unwrap();
+    let state_dir = temp.path().join("state").join("harbor");
+    fs::create_dir_all(&state_dir).unwrap();
+    let ledger = serde_json::json!({
+        "entries": {
+            binary.display().to_string(): {
+                "repo": "owner/tool",
+                "version": "v1.2.3",
+                "asset": "tool-v1.2.3-aarch64-unknown-linux-musl.tar.gz",
+                "asset_sha256": "a".repeat(64),
+                "binary_sha256": "b".repeat(64),
+                "installed_at": 1_700_000_000_u64,
+                "bin_dir": bin_dir.display().to_string(),
+            }
+        }
+    });
+    fs::write(
+        state_dir.join("installs.json"),
+        serde_json::to_vec_pretty(&ledger).unwrap(),
+    )
+    .unwrap();
+    let output = run(temp.path(), &["status", "--offline", "--json"]);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let rows = json.as_array().unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["repo"], "owner/tool");
+    assert_eq!(rows[0]["installed"], "v1.2.3");
+    assert_eq!(rows[0]["state"], "installed");
+    assert_eq!(rows[0]["present"], true);
+}
+
+#[test]
 fn source_add_accepts_bare_and_colon_forms() {
     let temp = temp_env();
     let config = temp.path().join("harbor.toml");

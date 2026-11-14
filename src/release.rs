@@ -67,6 +67,100 @@ impl AssetChoice {
     pub fn size_label(&self) -> String {
         crate::format::bytes(self.asset.size)
     }
+
+    /// True when the asset can run on the current platform. Explicitly
+    /// requested assets are still installable even when they look unusual.
+    #[must_use]
+    pub fn compatible(&self) -> bool {
+        self.explicit || self.score > 0
+    }
+}
+
+/// Assets split by current-platform compatibility, sorted best-first.
+/// Incompatible assets are retained so the UI can explain exactly why a
+/// release cannot be installed instead of pretending the release itself is
+/// missing.
+#[derive(Clone, Debug, Default)]
+pub struct AssetCatalog {
+    pub compatible: Vec<AssetChoice>,
+    pub incompatible: Vec<AssetChoice>,
+}
+
+impl AssetCatalog {
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.compatible.is_empty() && self.incompatible.is_empty()
+    }
+
+    #[must_use]
+    pub fn best(&self) -> Option<&AssetChoice> {
+        self.compatible.first()
+    }
+}
+
+/// Explain why an otherwise supported asset cannot run here.
+#[must_use]
+pub fn incompatibility(platform: Platform, name: &str) -> Option<&'static str> {
+    let lower = name.to_ascii_lowercase();
+    if platform.has_foreign_os(&lower) {
+        return Some("different operating system");
+    }
+    if platform.has_foreign_arch(&lower) {
+        return Some("different architecture");
+    }
+    if let Some(kind) = AssetKind::from_name(name) {
+        if kind == AssetKind::Raw
+            && lower.ends_with(".exe")
+            && platform.os != crate::platform::Os::Windows
+        {
+            return Some("Windows executable");
+        }
+        if kind == AssetKind::Raw
+            && lower.ends_with(".appimage")
+            && platform.os != crate::platform::Os::Linux
+        {
+            return Some("Linux AppImage");
+        }
+    }
+    None
+}
+
+/// Return every supported archive/binary, split into compatible and
+/// incompatible groups. Metadata and unsupported containers are omitted.
+#[must_use]
+pub fn catalog_assets(platform: Platform, release: &Release) -> AssetCatalog {
+    let mut catalog = AssetCatalog::default();
+    for asset in &release.assets {
+        if is_metadata_asset(&asset.name) {
+            continue;
+        }
+        let Some(kind) = AssetKind::from_name(&asset.name) else {
+            continue;
+        };
+        let score = score_asset(platform, &asset.name).unwrap_or(-1000);
+        let choice = AssetChoice {
+            asset: asset.clone(),
+            kind,
+            score,
+            explicit: false,
+        };
+        if choice.compatible() {
+            catalog.compatible.push(choice);
+        } else {
+            catalog.incompatible.push(choice);
+        }
+    }
+    let sort = |choices: &mut Vec<AssetChoice>| {
+        choices.sort_by(|left, right| {
+            right
+                .score
+                .cmp(&left.score)
+                .then_with(|| left.asset.name.cmp(&right.asset.name))
+        });
+    };
+    sort(&mut catalog.compatible);
+    sort(&mut catalog.incompatible);
+    catalog
 }
 
 /// True for checksums, signatures, SBOMs, installers, and source archives.
@@ -128,8 +222,9 @@ pub fn is_metadata_asset(name: &str) -> bool {
         || lower.starts_with("notice")
 }
 
-/// Score one asset for the current platform. Lower-level platform conflicts
-/// are rejected outright so a macOS ARM binary can never be chosen on Linux.
+/// Score one supported asset for the current platform. A strongly negative
+/// score marks a foreign asset; [`select_assets`] filters those out while
+/// [`catalog_assets`] keeps them for explanatory UI.
 #[must_use]
 pub fn score_asset(platform: Platform, name: &str) -> Option<i32> {
     if is_metadata_asset(name) {
@@ -137,21 +232,7 @@ pub fn score_asset(platform: Platform, name: &str) -> Option<i32> {
     }
     let kind = AssetKind::from_name(name)?;
     let lower = name.to_ascii_lowercase();
-    if kind == AssetKind::Raw
-        && lower.ends_with(".exe")
-        && platform.os != crate::platform::Os::Windows
-    {
-        return None;
-    }
-    if kind == AssetKind::Raw
-        && lower.ends_with(".appimage")
-        && platform.os != crate::platform::Os::Linux
-    {
-        return None;
-    }
-    if platform.has_foreign_os(&lower) || platform.has_foreign_arch(&lower) {
-        return None;
-    }
+    let incompatible = incompatibility(platform, name).is_some();
     let tokens = crate::platform::split_tokens(&lower);
     let mut score = 0i32;
     if platform.names_os(&lower) {
@@ -190,6 +271,9 @@ pub fn score_asset(platform: Platform, name: &str) -> Option<i32> {
     }
     if tokens.contains(&"symbols") {
         score -= 40;
+    }
+    if incompatible {
+        score -= 100;
     }
     Some(score)
 }
@@ -336,6 +420,36 @@ mod tests {
             "rtop-v1-x86_64-unknown-linux-musl.tar.gz"
         );
         assert_eq!(choices.len(), 1);
+    }
+
+    #[test]
+    fn catalog_explains_rtop_x86_64_assets_on_arm64_linux() {
+        let release = release(&[
+            "rtop-linux-x86_64.tar.gz",
+            "rtop-macos-aarch64.tar.gz",
+            "rtop-macos-x86_64.tar.gz",
+            "rtop-windows-x86_64.zip",
+            "SHA256SUMS",
+        ]);
+        let arm = Platform {
+            os: Os::Linux,
+            arch: Arch::Aarch64,
+            libc: Libc::Gnu,
+        };
+        let catalog = catalog_assets(arm, &release);
+        assert!(catalog.compatible.is_empty());
+        assert_eq!(catalog.incompatible.len(), 4);
+        let reasons: Vec<&str> = catalog
+            .incompatible
+            .iter()
+            .filter_map(|choice| incompatibility(arm, &choice.asset.name))
+            .collect();
+        assert!(reasons.contains(&"different architecture"));
+        assert!(reasons.contains(&"different operating system"));
+        assert!(matches!(
+            select_assets(arm, &release, None),
+            Err(Error::NoAsset { .. })
+        ));
     }
 
     #[test]

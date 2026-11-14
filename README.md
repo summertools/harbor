@@ -18,18 +18,17 @@ the scriptable CLI.
 
 ```text
   harbor  safe release installer · GitHub releases                  linux-aarch64-gnu
-  bin ~/.local/bin  on PATH                    4 sources · 12 repos
+  bin ~/.local/bin  on PATH                    2 installed · 1 update · 3 available
 
-╭─ repositories · 4/4 · all sources ─────────────────╮╭─ details ───────────────────────────────╮
-│› ● summertools/dulens    org:summertools           ││ summertools/dulens · dulens v0.2.0      │
-│  ● summertools/mdtui     org:summertools           ││ Explore disk usage with a readable tree │
-│  ● summertools/rscreen   org:summertools           ││ release v0.2.0  2026-11-11              │
-│  ● summertools/rtop      org:summertools           ││ checksum SHA-256 published  1021 KiB    │
-│                                                    ││ install  ~/.local/bin  on PATH          │
-│                                                    ││ assets · 1 compatible                   │
-│                                                    ││ › tar.gz dulens-v0.2.0-aarch64...       │
-╰────────────────────────────────────────────────────╯╰─────────────────────────────────────────╯
- ↑↓ move  Enter release  i install  Tab assets  / search  f source  s sources  r refresh  ? help  q quit
+╭─ repositories · 5/5 · all · all sources ─────────────────╮╭─ details ───────────────────────────────╮
+│› ● summertools/dulens    org:summertools  ✓ v0.2.0        ││status   installed v0.2.0 · up to date    │
+│  ● summertools/harbor    org:summertools  ○               ││path     ~/.local/bin/dulens              │
+│  ● summertools/mdtui     org:summertools  ↑ v0.0.1        ││installed 2026-11-11 10:26 UTC            │
+│  ● summertools/rscreen   org:summertools  ○               ││release v0.2.0  2026-11-11                │
+│  ● summertools/rtop      org:summertools  ○               ││checksum SHA-256 published  1021 KiB      │
+│                                                            ││assets · 1 compatible · 3 other           │
+╰────────────────────────────────────────────────────────────╯╰─────────────────────────────────────────╯
+ ↑↓ move  Enter release  i install  Tab assets  / search  v status  f source  s sources  r refresh  ? help  q quit
 ```
 
 ## Features
@@ -44,8 +43,10 @@ the scriptable CLI.
   absolute paths, `..`, symlinks, hard links, devices, and FIFOs are rejected.
 - **Atomic installation** with mode `0755`, a same-directory staging file, and
   rollback if a replacement fails.
-- **Install ledger** so updates and overwrites only touch files harbor manages.
-  Unmanaged files require `--force` or the explicit overwrite toggle in the UI.
+- **Install ledger and status at a glance**: every repository row shows
+  `✓ installed vX`, `↑ update vX → vY`, `! missing`, `! no compatible asset`, or
+  `○ not installed`. The header summarises installed, update, and available
+  counts. Unmanaged files require `--force` or the explicit overwrite toggle.
 - **Polished ratatui interface** with search, source filters, asset selection,
   live progress, confirmations, and a source manager.
 - **Scriptable CLI** with JSON output, dry runs, explicit tags, asset globs,
@@ -77,12 +78,18 @@ harbor install dulens
 # Install directly from any GitHub repository
 harbor install BurntSushi/ripgrep --yes
 
+# See installed versions, update status, and installed paths
+harbor status
+harbor status --offline
+
 # Add a custom organisation or repository to the saved sources
 harbor source add org rust-lang
 harbor source add repo BurntSushi/ripgrep
 
 # Inspect before installing
 harbor list
+harbor list --installed
+harbor list --available
 harbor releases rtop
 harbor install rtop --dry-run
 ```
@@ -104,6 +111,7 @@ Run `harbor` with no subcommand.
 | `/` | Search repositories live |
 | `Enter` / `Esc` | Apply / cancel search |
 | `Ctrl+U` | Clear the search text |
+| `v` | Cycle status filter: all / installed / updates / not installed |
 | `f` | Cycle the source filter |
 | `s` | Manage sources |
 | `r` | Refresh repositories |
@@ -119,6 +127,30 @@ In the confirmation screen:
 | `o` | Allow replacing an unmanaged file |
 | `Esc` / `n` | Cancel |
 
+### Installed status
+
+Every repository row carries a compact status chip:
+
+| Chip | Meaning |
+| --- | --- |
+| `✓ vX` | Installed and, when latest metadata is available, up to date |
+| `↑ vX → vY` | Installed version differs from the latest release |
+| `! missing vX` | The ledger says installed, but the executable is gone |
+| `! no compatible asset` | The latest release has no asset for this platform |
+| `○ not installed` | No managed install is recorded |
+| `○ checking…` | Latest release metadata is being fetched |
+
+The header shows `N installed · N updates · N available`. Press `v` to cycle the
+list filter between all repositories, installed ones, updates, and not-installed
+ones. The details pane repeats the installed version, executable path, install
+time, update state, and any platform-incompatibility explanation.
+
+If a release exists but only publishes assets for other systems, Harbor keeps
+the release visible, lists those assets with reasons such as *different
+architecture* or *different operating system*, and disables installation instead
+of reporting a misleading load failure. Repositories with no usable release show
+a distinct **no installable release** state.
+
 The source manager accepts `org:name`, `repo:owner/name`, `org name`,
 `repo owner/name`, or a bare `owner/repo`. Changes are written atomically to the
 config file.
@@ -132,7 +164,8 @@ harbor [--config FILE] [--bin-dir DIR] [--no-color] [--quiet] [--json] [COMMAND]
 | Command | Purpose |
 | --- | --- |
 | `harbor` / `harbor tui` | Interactive browser |
-| `harbor list [--source S] [--all]` | List repositories from configured sources |
+| `harbor list [--source S] [--all] [--installed\|--available]` | List repositories and their install status |
+| `harbor status [--offline]` | Show installed versions, latest versions, update state, and paths |
 | `harbor releases <repo> [--tag T] [--limit N]` | List releases and compatible assets |
 | `harbor install <repo>` | Resolve, verify, and install |
 | `harbor update` | Update managed installs from the ledger |
@@ -166,8 +199,9 @@ harbor install owner/repo \
 | `--dry-run` | Resolve and print the plan without downloading |
 
 With `--json`, `install` and `update` emit a machine-readable result on stdout;
-progress stays on stderr. `list`, `releases`, `source list`, and `doctor` also
-support `--json`.
+progress stays on stderr. `list`, `status`, `releases`, `source list`, and
+`doctor` also support `--json`. `harbor status --offline` works without network
+access and reports the ledger only.
 
 ## Sources and configuration
 

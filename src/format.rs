@@ -46,6 +46,30 @@ pub fn bytes_short(value: u64) -> String {
     }
 }
 
+/// Format a Unix timestamp as a compact UTC date and time.
+#[must_use]
+pub fn unix_datetime(seconds: u64) -> String {
+    let days = (seconds / 86_400) as i64;
+    let rem = seconds % 86_400;
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let mut year = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = mp + if mp < 10 { 3 } else { -9 };
+    if month <= 2 {
+        year += 1;
+    }
+    format!(
+        "{year:04}-{month:02}-{day:02} {:02}:{:02}",
+        rem / 3_600,
+        (rem % 3_600) / 60
+    )
+}
+
 /// Display width in terminal cells.
 #[must_use]
 pub fn width(text: &str) -> usize {
@@ -175,6 +199,12 @@ mod tests {
     fn truncation_counts_wide_characters() {
         assert_eq!(truncate("abc日本語", 5), "abc…");
         assert_eq!(truncate_left("/home/user/日本語", 7), "…日本語");
+    }
+
+    #[test]
+    fn unix_datetime_is_utc_and_zero_padded() {
+        assert_eq!(unix_datetime(0), "1970-01-01 00:00");
+        assert_eq!(unix_datetime(1_700_000_000), "2023-11-14 22:13");
     }
 
     #[test]
