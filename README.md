@@ -18,7 +18,7 @@ the scriptable CLI.
 
 ```text
   harbor  safe release installer · GitHub releases                  linux-aarch64-gnu
-  bin ~/.local/bin  on PATH                    2 installed · 1 update · 3 available
+  bin ~/.local/bin  on PATH                    2 installed · 1 update · 3 not installed
 
 ╭─ repositories · 5/5 · all · all sources ─────────────────╮╭─ details ───────────────────────────────╮
 │› ● summertools/dulens    org:summertools  ✓ v0.2.0        ││status   installed v0.2.0 · up to date    │
@@ -45,7 +45,7 @@ the scriptable CLI.
   rollback if a replacement fails.
 - **Install ledger and status at a glance**: every repository row shows
   `✓ installed vX`, `↑ update vX → vY`, `! missing`, `! no compatible asset`, or
-  `○ not installed`. The header summarises installed, update, and available
+  `○ not installed`. The header summarises installed, update, and not-installed
   counts. Unmanaged files require `--force` or the explicit overwrite toggle.
 - **Polished ratatui interface** with search, source filters, asset selection,
   live progress, confirmations, and a source manager.
@@ -140,7 +140,7 @@ Every repository row carries a compact status chip:
 | `○ not installed` | No managed install is recorded |
 | `○ checking…` | Latest release metadata is being fetched |
 
-The header shows `N installed · N updates · N available`. Press `v` to cycle the
+The header shows `N installed · N updates · N not installed`. Press `v` to cycle the
 list filter between all repositories, installed ones, updates, and not-installed
 ones. The details pane repeats the installed version, executable path, install
 time, update state, and any platform-incompatibility explanation.

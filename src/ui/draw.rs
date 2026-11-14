@@ -220,7 +220,7 @@ fn draw_header(frame: &mut Frame, state: &UiState, area: Rect, theme: Theme) {
     frame.render_widget(
         Paragraph::new(Line::from(vec![Span::styled(
             format!(
-                "{} installed · {} update{} · {} available",
+                "{} installed · {} update{} · {} not installed",
                 installed,
                 updates,
                 if updates == 1 { "" } else { "s" },
@@ -1638,9 +1638,18 @@ mod tests {
     #[test]
     fn incompatible_release_assets_are_explained_not_treated_as_load_failure() {
         let mut state = state();
+        let foreign = if cfg!(target_os = "windows") {
+            "rtop-linux-x86_64.tar.gz"
+        } else {
+            "rtop-windows-x86_64.zip"
+        };
         let choice = AssetChoice {
-            asset: asset("rtop-macos-aarch64.tar.gz"),
-            kind: AssetKind::TarGz,
+            asset: asset(foreign),
+            kind: if foreign.ends_with(".zip") {
+                AssetKind::Zip
+            } else {
+                AssetKind::TarGz
+            },
             score: -100,
             explicit: false,
         };

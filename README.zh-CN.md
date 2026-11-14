@@ -16,7 +16,7 @@ CPU 架构的包，校验 SHA-256，在不信任压缩包路径的前提下安�
 
 ```text
   harbor  safe release installer · GitHub releases                  linux-aarch64-gnu
-  bin ~/.local/bin  on PATH                    2 installed · 1 update · 3 available
+  bin ~/.local/bin  on PATH                    2 installed · 1 update · 3 not installed
 
 ╭─ repositories · 5/5 · all · all sources ─────────────────╮╭─ details ───────────────────────────────╮
 │› ● summertools/dulens    org:summertools  ✓ v0.2.0        ││status   installed v0.2.0 · up to date    │
