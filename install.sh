@@ -8,14 +8,12 @@
 # archive.
 #
 # Usage:
-#   sh install.sh [vX.Y.Z]
+#   curl -fsSL https://github.com/summertools/harbor/releases/latest/download/install.sh | sh
+#   curl -fsSL https://github.com/summertools/harbor/releases/latest/download/install.sh | sh -s -- vX.Y.Z
 #   HARBOR_BIN_DIR="$HOME/bin" sh install.sh
 #
-# The release workflow uploads this file as `install.sh` on every release. For
-# the latest release:
-#   curl -fsSLO https://github.com/summertools/harbor/releases/latest/download/install.sh
-#   less install.sh
-#   sh install.sh
+# For high-security environments, download and inspect this file before running
+# it. The release workflow uploads it as `install.sh` on every release.
 
 set -eu
 

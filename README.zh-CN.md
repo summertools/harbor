@@ -56,10 +56,17 @@ CPU 架构的包，校验 SHA-256，在不信任压缩包路径的前提下安�
 
 ## 安装
 
-### 预编译二进制（Linux 和 macOS）
+### 一行安装（Linux 和 macOS）
 
-安装脚本会解析 Release、下载对应压缩包和 SHA-256 文件、验证摘要，再以原子方式
-只安装 `harbor` 可执行文件。脚本不会使用 `sudo`，也不会修改 shell 启动文件。
+```bash
+curl -fsSL https://github.com/summertools/harbor/releases/latest/download/install.sh | sh
+```
+
+这和 rustup 使用的便捷安装方式一致。Harbor 的安装脚本很短且公开：它会解析
+Release、下载对应压缩包和 SHA-256 文件、验证摘要，再以原子方式只安装 `harbor`
+可执行文件。脚本不会使用 `sudo`，也不会修改 shell 启动文件。
+
+对安全性要求更高的环境，可以先下载并检查脚本：
 
 ```bash
 curl -fsSLO https://github.com/summertools/harbor/releases/latest/download/install.sh
@@ -70,11 +77,12 @@ sh install.sh
 指定版本或安装目录：
 
 ```bash
-sh install.sh v0.2.0
-HARBOR_BIN_DIR="$HOME/bin" sh install.sh
+curl -fsSL https://github.com/summertools/harbor/releases/latest/download/install.sh | sh -s -- v0.2.0
+curl -fsSL https://github.com/summertools/harbor/releases/latest/download/install.sh | HARBOR_BIN_DIR="$HOME/bin" sh
 ```
 
-请避免把未经检查的脚本直接通过管道交给 shell。Windows 用户可以从
+安装脚本默认使用 `~/.local/bin`；如果该目录不在 `PATH`，会打印添加提示。
+Windows 用户可以从
 [Release 页面](https://github.com/summertools/harbor/releases) 下载 `.zip`，
 将 `harbor.exe` 放到 `PATH` 中的目录。
 

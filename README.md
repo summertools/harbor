@@ -64,11 +64,19 @@ the scriptable CLI.
 
 ## Installation
 
-### Prebuilt binary (Linux and macOS)
+### One-line install (Linux and macOS)
 
-The installer resolves a release, downloads the matching archive and its
+```bash
+curl -fsSL https://github.com/summertools/harbor/releases/latest/download/install.sh | sh
+```
+
+This uses the same convenience pattern as rustup. Harbor's installer is a short,
+public script: it resolves the release, downloads the matching archive and its
 published SHA-256 file, verifies the digest, and atomically installs only the
 `harbor` executable. It never uses `sudo` or edits shell startup files.
+
+For high-security environments, download and review the script before running
+it:
 
 ```bash
 curl -fsSLO https://github.com/summertools/harbor/releases/latest/download/install.sh
@@ -79,13 +87,13 @@ sh install.sh
 Pin a release or choose the destination:
 
 ```bash
-sh install.sh v0.2.0
-HARBOR_BIN_DIR="$HOME/bin" sh install.sh
+curl -fsSL https://github.com/summertools/harbor/releases/latest/download/install.sh | sh -s -- v0.2.0
+curl -fsSL https://github.com/summertools/harbor/releases/latest/download/install.sh | HARBOR_BIN_DIR="$HOME/bin" sh
 ```
 
-Avoid piping an unreviewed script directly into a shell. Windows users can
-download the `.zip` asset from the
-[release page](https://github.com/summertools/harbor/releases) and place
+The installer defaults to `~/.local/bin` and prints an export hint when that
+directory is not on `PATH`. Windows users can download the `.zip` asset from
+the [release page](https://github.com/summertools/harbor/releases) and place
 `harbor.exe` in a directory on `PATH`.
 
 The Linux archives are static musl builds and run on both glibc and musl
