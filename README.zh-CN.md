@@ -63,7 +63,9 @@ cargo install --path .
 
 每个 [Release](https://github.com/summertools/harbor/releases) 还提供 Linux
 （x86_64、aarch64）、macOS（Intel、Apple 芯片）和 Windows（x86_64）预编译包，
-并附带 SHA-256 校验文件；解压前请先校验。
+并附带 SHA-256 校验文件；解压前请先校验。Linux 预编译包是静态 musl 构建，
+可在 glibc 和 musl 系统上运行；harbor 按宿主机 C 库判断资产兼容性，因此在
+glibc 系统上使用 musl 构建仍可识别 glibc 资产。
 
 ## 快速开始
 

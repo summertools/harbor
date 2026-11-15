@@ -3,6 +3,7 @@
 use std::env;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
+use std::sync::OnceLock;
 
 use crate::error::{Error, Result};
 
@@ -90,8 +91,13 @@ pub struct Platform {
 }
 
 impl Platform {
-    /// Detect the running platform. `cfg!` is deliberate: asset matching must
-    /// describe the binary we can actually execute, not merely the host kernel.
+    /// Detect the platform used for asset compatibility.
+    ///
+    /// On Linux the libc component describes the host ABI, not necessarily
+    /// the ABI Harbor itself was built with. The published Linux binaries are
+    /// static musl builds that also run on glibc systems, so they must still
+    /// recognise glibc assets there. On a musl-only host, glibc assets are
+    /// rejected instead of being offered and failing at exec time.
     #[must_use]
     pub fn current() -> Self {
         let os = if cfg!(target_os = "linux") {
@@ -122,10 +128,8 @@ impl Platform {
             } else {
                 Libc::Gnu
             }
-        } else if cfg!(target_env = "musl") {
-            Libc::Musl
-        } else if cfg!(target_env = "gnu") {
-            Libc::Gnu
+        } else if os == Os::Linux {
+            detect_linux_libc()
         } else {
             Libc::Unknown
         };
@@ -202,6 +206,65 @@ impl Platform {
             Arch::Other => false,
         }
     }
+}
+
+fn detect_linux_libc() -> Libc {
+    let build_env = if cfg!(target_env = "gnu") {
+        "gnu"
+    } else if cfg!(target_env = "musl") {
+        "musl"
+    } else {
+        ""
+    };
+    let glibc_loader = cfg!(target_os = "linux") && glibc_loader_present();
+    linux_libc(build_env, glibc_loader)
+}
+
+fn linux_libc(build_env: &str, glibc_loader: bool) -> Libc {
+    if build_env == "gnu" || glibc_loader {
+        Libc::Gnu
+    } else if build_env == "musl" {
+        Libc::Musl
+    } else {
+        Libc::Unknown
+    }
+}
+
+/// True when a glibc dynamic loader is installed on the host. This is what
+/// distinguishes a static-musl Harbor running on glibc from one running on a
+/// musl-only distribution such as Alpine.
+fn glibc_loader_present() -> bool {
+    static PRESENT: OnceLock<bool> = OnceLock::new();
+    *PRESENT.get_or_init(|| {
+        ["/lib", "/lib64"]
+            .iter()
+            .any(|root| loader_in(Path::new(root)))
+    })
+}
+
+fn loader_in(dir: &Path) -> bool {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return false;
+    };
+    for entry in entries.flatten() {
+        if entry.file_name().to_string_lossy().starts_with("ld-linux") && entry.path().is_file() {
+            return true;
+        }
+        // Debian-style multiarch keeps the loader one directory down, e.g.
+        // /lib/aarch64-linux-gnu/ld-linux-aarch64.so.1.
+        if entry.file_type().is_ok_and(|kind| kind.is_dir())
+            && let Ok(nested) = fs::read_dir(entry.path())
+        {
+            for entry in nested.flatten() {
+                if entry.file_name().to_string_lossy().starts_with("ld-linux")
+                    && entry.path().is_file()
+                {
+                    return true;
+                }
+            }
+        }
+    }
+    false
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -639,6 +702,15 @@ mod tests {
                 "rtop", "v0", "1", "3", "x86", "64", "unknown", "linux", "musl", "tar", "gz"
             ]
         );
+    }
+
+    #[test]
+    fn linux_libc_prefers_the_host_abi() {
+        assert_eq!(linux_libc("gnu", false), Libc::Gnu);
+        assert_eq!(linux_libc("musl", true), Libc::Gnu);
+        assert_eq!(linux_libc("musl", false), Libc::Musl);
+        assert_eq!(linux_libc("", false), Libc::Unknown);
+        assert_eq!(linux_libc("", true), Libc::Gnu);
     }
 
     #[test]

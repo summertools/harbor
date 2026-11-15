@@ -6,6 +6,17 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-11-15
+
+### Fixed
+
+- Linux platform detection now reports the host C library rather than the ABI
+  Harbor was built with. The static musl release therefore identifies a glibc
+  host as `linux-<arch>-gnu` and keeps glibc-linked release assets available.
+- glibc-only assets are now marked incompatible on musl-only Linux hosts, with
+  a `requires glibc` explanation, instead of being offered and failing at exec
+  time.
+
 ## [0.1.1] - 2026-11-15
 
 ### Fixed
@@ -66,6 +77,7 @@ All notable changes to this project are documented here. The format follows
 - Prefetching latest metadata for installed repositories no longer races with
   the selected-repository request or clears the wrong loading state.
 
-[Unreleased]: https://github.com/summertools/harbor/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/summertools/harbor/compare/v0.1.2...HEAD
+[0.1.2]: https://github.com/summertools/harbor/releases/tag/v0.1.2
 [0.1.1]: https://github.com/summertools/harbor/releases/tag/v0.1.1
 [0.1.0]: https://github.com/summertools/harbor/releases/tag/v0.1.0

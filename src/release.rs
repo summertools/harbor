@@ -108,6 +108,12 @@ pub fn incompatibility(platform: Platform, name: &str) -> Option<&'static str> {
     if platform.has_foreign_arch(&lower) {
         return Some("different architecture");
     }
+    if platform.os == crate::platform::Os::Linux
+        && platform.libc == crate::platform::Libc::Musl
+        && asset_requires_glibc(&lower)
+    {
+        return Some("requires glibc");
+    }
     if let Some(kind) = AssetKind::from_name(name) {
         if kind == AssetKind::Raw
             && lower.ends_with(".exe")
@@ -123,6 +129,14 @@ pub fn incompatibility(platform: Platform, name: &str) -> Option<&'static str> {
         }
     }
     None
+}
+
+fn asset_requires_glibc(lower: &str) -> bool {
+    let tokens = crate::platform::split_tokens(lower);
+    !tokens.contains(&"musl")
+        && (tokens.contains(&"gnu")
+            || tokens.iter().any(|token| token.starts_with("gnueabi"))
+            || lower.contains("glibc"))
 }
 
 /// Return every supported archive/binary, split into compatible and
@@ -450,6 +464,37 @@ mod tests {
             select_assets(arm, &release, None),
             Err(Error::NoAsset { .. })
         ));
+    }
+
+    #[test]
+    fn musl_hosts_reject_glibc_only_assets() {
+        let release = release(&[
+            "tool-aarch64-unknown-linux-gnu.tar.gz",
+            "tool-aarch64-unknown-linux-musl.tar.gz",
+        ]);
+        let musl = Platform {
+            os: Os::Linux,
+            arch: Arch::Aarch64,
+            libc: Libc::Musl,
+        };
+        let catalog = catalog_assets(musl, &release);
+        assert_eq!(catalog.compatible.len(), 1);
+        assert_eq!(
+            catalog.compatible[0].asset.name,
+            "tool-aarch64-unknown-linux-musl.tar.gz"
+        );
+        assert_eq!(
+            incompatibility(musl, "tool-aarch64-unknown-linux-gnu.tar.gz"),
+            Some("requires glibc")
+        );
+        // A project name containing "gnu" is not a glibc marker.
+        assert_eq!(incompatibility(musl, "gnuplot-linux-aarch64.tar.gz"), None);
+
+        let gnu = Platform {
+            libc: Libc::Gnu,
+            ..musl
+        };
+        assert_eq!(catalog_assets(gnu, &release).compatible.len(), 2);
     }
 
     #[test]

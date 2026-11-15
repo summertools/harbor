@@ -72,7 +72,10 @@ The binary is named `harbor`. Rust 1.88 or newer is required.
 Prebuilt archives for Linux (x86_64 and aarch64), macOS (Intel and Apple
 silicon), and Windows (x86_64) are attached to each
 [release](https://github.com/summertools/harbor/releases), together with
-SHA-256 checksum files. Verify the checksum before extracting.
+SHA-256 checksum files. Verify the checksum before extracting. The Linux
+archives are static musl builds and run on both glibc and musl systems; Harbor
+reports the host C library for asset compatibility, so a musl build on a glibc
+host still accepts glibc-linked releases.
 
 ## Quick start
 
