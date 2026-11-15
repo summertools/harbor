@@ -6,6 +6,14 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-11-15
+
+### Fixed
+
+- Auto-update now reports the running Harbor executable as current when no
+  update is available; it still refuses to replace itself when a newer release
+  exists.
+
 ## [0.1.0] - 2026-11-15
 
 ### Added
@@ -58,5 +66,6 @@ All notable changes to this project are documented here. The format follows
 - Prefetching latest metadata for installed repositories no longer races with
   the selected-repository request or clears the wrong loading state.
 
-[Unreleased]: https://github.com/summertools/harbor/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/summertools/harbor/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/summertools/harbor/releases/tag/v0.1.1
 [0.1.0]: https://github.com/summertools/harbor/releases/tag/v0.1.0

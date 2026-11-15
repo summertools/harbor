@@ -83,11 +83,6 @@ pub fn decide(
             reason: "the recorded executable is missing".to_owned(),
         };
     }
-    if is_running_executable(&package.path) {
-        return Decision::Skip {
-            reason: "refusing to update the running harbor executable".to_owned(),
-        };
-    }
     match version::is_newer(&package.version, &release.tag_name) {
         Some(true) => {}
         Some(false) => return Decision::Current,
@@ -99,6 +94,13 @@ pub fn decide(
                 ),
             };
         }
+    }
+    // Only refuse a replacement when an update would actually happen. A
+    // current running Harbor should be reported as current, not as skipped.
+    if is_running_executable(&package.path) {
+        return Decision::Skip {
+            reason: "refusing to update the running harbor executable".to_owned(),
+        };
     }
 
     let catalog = release::catalog_assets(platform, release);
@@ -276,6 +278,29 @@ mod tests {
         );
         let decision = decide(&config(), Platform::current(), &package("v1.0.0"), &release);
         assert!(matches!(decision, Decision::Update(_)), "{decision:?}");
+    }
+
+    #[test]
+    fn current_running_executable_is_not_reported_as_skipped() {
+        let current = std::env::current_exe().expect("test executable");
+        let mut package = package("v1.0.0");
+        package.path = current.clone();
+        package.bin_dir = current
+            .parent()
+            .expect("test executable parent")
+            .to_path_buf();
+
+        let same = release("v1.0.0", &["tool.tar.gz", "tool.tar.gz.sha256"]);
+        assert!(matches!(
+            decide(&config(), Platform::current(), &package, &same),
+            Decision::Current
+        ));
+
+        let newer = release("v2.0.0", &["tool.tar.gz", "tool.tar.gz.sha256"]);
+        assert!(matches!(
+            decide(&config(), Platform::current(), &package, &newer),
+            Decision::Skip { .. }
+        ));
     }
 
     #[test]

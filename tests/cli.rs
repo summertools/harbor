@@ -37,7 +37,8 @@ fn help_and_version_are_available() {
     assert!(String::from_utf8_lossy(&help.stdout).contains("Harbor discovers release binaries"));
     let version = run(temp.path(), &["--version"]);
     assert!(version.status.success());
-    assert!(String::from_utf8_lossy(&version.stdout).contains("harbor 0.1.0"));
+    let expected = format!("harbor {}", env!("CARGO_PKG_VERSION"));
+    assert!(String::from_utf8_lossy(&version.stdout).contains(&expected));
 }
 
 #[test]

@@ -384,7 +384,8 @@ Auto-update is intentionally stricter than a manual update:
 - the release must publish a SHA-256 checksum. **Auto-update ignores
   `allow_unverified` and never installs an unverified asset**;
 - a modified or unmanaged target file is never replaced;
-- the currently running Harbor executable is skipped;
+- the currently running Harbor executable is never replaced; when it is
+  already up to date it is reported as current rather than skipped;
 - failures are reported per repository and do not abort the remaining updates.
 
 The interactive UI shows auto-update progress in the footer and reports the
