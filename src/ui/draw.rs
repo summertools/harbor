@@ -439,6 +439,7 @@ fn install_summary(state: &UiState, theme: Theme) -> Vec<Line<'static>> {
 }
 
 fn draw_repo_panel(frame: &mut Frame, state: &mut UiState, area: Rect, theme: Theme) {
+    state.repo_panel_area = area;
     let filter = state.source_filter_label();
     let title = format!(
         " repositories · {}/{} · {} · {} ",
@@ -459,6 +460,7 @@ fn draw_repo_panel(frame: &mut Frame, state: &mut UiState, area: Rect, theme: Th
             format::truncate(&title, usize::from(area.width.saturating_sub(2))).into_owned(),
             theme.title(),
         ));
+    state.repo_list_area = block.inner(area);
     if state.loading_repos {
         let inner = block.inner(area);
         frame.render_widget(block, area);
@@ -580,6 +582,7 @@ fn draw_repo_panel(frame: &mut Frame, state: &mut UiState, area: Rect, theme: Th
 }
 
 fn draw_detail_panel(frame: &mut Frame, state: &mut UiState, area: Rect, theme: Theme) {
+    state.detail_panel_area = area;
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
@@ -898,7 +901,7 @@ fn draw_footer(frame: &mut Frame, state: &UiState, area: Rect, theme: Theme) {
         match &state.stage {
             Stage::Browse => match state.focus {
                 Focus::Repos => {
-                    "↑↓ move  Enter release  i install  Tab assets  / search  v status  f source  s sources  r refresh  ? help  q quit"
+                    "click/↑↓ select  Enter open  i install  Tab assets  / search  v status  f source  s sources  r refresh  ? help  q quit"
                 }
                 Focus::Assets => {
                     "↑↓ asset  Enter install  i install  Tab repos  Esc back  / search  v status  s sources  ? help  q quit"
@@ -1341,7 +1344,7 @@ fn draw_sources(frame: &mut Frame, state: &UiState, sources: &SourceState, theme
 }
 
 fn draw_help(frame: &mut Frame, theme: Theme) {
-    let inner = modal(frame, 78, 22, "help", theme);
+    let inner = modal(frame, 90, 23, "help · Esc closes", theme);
     if inner.is_empty() {
         return;
     }
@@ -1353,6 +1356,10 @@ fn draw_help(frame: &mut Frame, theme: Theme) {
         )),
         Line::from(Span::styled(
             "  Tab switch pane    Enter inspect/install    Esc back",
+            theme.dim(),
+        )),
+        Line::from(Span::styled(
+            "  Mouse: click rows · wheel scroll · Shift+drag selects",
             theme.dim(),
         )),
         Line::from(""),
@@ -1393,8 +1400,6 @@ fn draw_help(frame: &mut Frame, theme: Theme) {
             "  Default: org:summertools. Add any org or owner/repo with `s`.",
             theme.dim(),
         )),
-        Line::from(""),
-        Line::from(Span::styled("Press Esc to close.", theme.dim())),
     ];
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 }
@@ -1778,5 +1783,30 @@ mod tests {
         });
         let outcome = render(&mut state, 100, 34);
         assert!(outcome.contains("installed"));
+    }
+    #[test]
+    fn mouse_selection_updates_focus_and_clears_stale_release() {
+        let mut state = state();
+        state.release = Some(ReleaseView::new(
+            RepoRef {
+                owner: "summertools".to_owned(),
+                name: "rtop".to_owned(),
+            },
+            release(),
+            crate::release::AssetCatalog::default(),
+        ));
+        state.focus = Focus::Assets;
+        state.select_repo(1);
+        assert_eq!(state.selected, 1);
+        assert_eq!(
+            state.selected_repo().map(|repo| repo.full_name.as_str()),
+            Some("summertools/dulens")
+        );
+        assert_eq!(state.focus, Focus::Repos);
+        assert!(state.release.is_none());
+        assert!(state.status.is_none());
+
+        state.select_repo(99);
+        assert_eq!(state.selected, 1);
     }
 }

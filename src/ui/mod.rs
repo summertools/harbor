@@ -11,12 +11,16 @@ use std::time::{Duration, Instant};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::crossterm::cursor::{Hide, Show};
-use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use ratatui::crossterm::event::{
+    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
+    KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+};
 use ratatui::crossterm::execute;
 use ratatui::crossterm::terminal::{
     self, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode,
     enable_raw_mode,
 };
+use ratatui::layout::Rect;
 use ratatui::widgets::ListState;
 
 use crate::Harbor;
@@ -76,15 +80,21 @@ pub fn run(harbor: Harbor, options: UiOptions) -> Result<()> {
                 .terminal
                 .draw(|frame| draw::draw(frame, &mut app.state))
                 .map_err(Error::Io)?;
+            // Crossterm's mouse capture also enables pointer-motion events.
+            // Drain a bounded batch so a moving mouse can never starve the
+            // render/tick loop, while still coalescing ordinary key bursts.
+            let mut processed = 0usize;
             while event::poll(Duration::from_millis(100)).map_err(Error::Io)? {
                 match event::read().map_err(Error::Io)? {
                     Event::Key(key) if key.kind == KeyEventKind::Press => {
                         app.handle_key(key);
                     }
+                    Event::Mouse(mouse) => app.handle_mouse(mouse),
                     Event::Resize(_, _) => {}
                     _ => {}
                 }
-                if app.quit {
+                processed = processed.saturating_add(1);
+                if app.quit || processed >= 64 {
                     break;
                 }
             }
@@ -116,7 +126,14 @@ impl TerminalSession {
         }
         enable_raw_mode()?;
         let mut stdout = std::io::stdout();
-        if let Err(error) = execute!(stdout, EnterAlternateScreen, Hide, Clear(ClearType::All)) {
+        if let Err(error) = execute!(
+            stdout,
+            EnterAlternateScreen,
+            EnableMouseCapture,
+            Hide,
+            Clear(ClearType::All)
+        ) {
+            let _ = execute!(stdout, DisableMouseCapture, LeaveAlternateScreen, Show);
             let _ = disable_raw_mode();
             return Err(Error::Io(error));
         }
@@ -131,7 +148,12 @@ impl TerminalSession {
 
 impl Drop for TerminalSession {
     fn drop(&mut self) {
-        let _ = execute!(self.terminal.backend_mut(), LeaveAlternateScreen, Show);
+        let _ = execute!(
+            self.terminal.backend_mut(),
+            DisableMouseCapture,
+            LeaveAlternateScreen,
+            Show
+        );
         let _ = self.terminal.show_cursor();
         let _ = disable_raw_mode();
     }
@@ -139,7 +161,12 @@ impl Drop for TerminalSession {
 
 fn restore_terminal() {
     let _ = disable_raw_mode();
-    let _ = execute!(std::io::stdout(), LeaveAlternateScreen, Show);
+    let _ = execute!(
+        std::io::stdout(),
+        DisableMouseCapture,
+        LeaveAlternateScreen,
+        Show
+    );
 }
 
 enum Command {
@@ -400,6 +427,9 @@ pub(crate) struct UiState {
     pub selected: usize,
     pub repo_state: ListState,
     pub focus: Focus,
+    pub(crate) repo_panel_area: Rect,
+    pub(crate) repo_list_area: Rect,
+    pub(crate) detail_panel_area: Rect,
     pub release: Option<ReleaseView>,
     pub release_loading: bool,
     release_inflight: Option<String>,
@@ -453,6 +483,9 @@ impl UiState {
             selected: 0,
             repo_state: ListState::default(),
             focus: Focus::Repos,
+            repo_panel_area: Rect::new(0, 0, 0, 0),
+            repo_list_area: Rect::new(0, 0, 0, 0),
+            detail_panel_area: Rect::new(0, 0, 0, 0),
             release: None,
             release_loading: false,
             release_inflight: None,
@@ -594,6 +627,21 @@ impl UiState {
             self.repo_state.select(Some(self.selected));
             self.on_selection_changed();
         }
+    }
+
+    /// Select a repository by its visible list index. Used by mouse clicks so
+    /// pointer and keyboard selection share the same state transition.
+    fn select_repo(&mut self, index: usize) {
+        if index >= self.filtered.len() {
+            return;
+        }
+        self.focus = Focus::Repos;
+        if index == self.selected {
+            return;
+        }
+        self.selected = index;
+        self.repo_state.select(Some(index));
+        self.on_selection_changed();
     }
 
     fn page_repo(&mut self, rows: usize, down: bool) {
@@ -1197,6 +1245,69 @@ impl App {
         self.start();
     }
 
+    fn handle_mouse(&mut self, mouse: MouseEvent) {
+        // Modal dialogs and search input own the keyboard and mouse until they
+        // are dismissed; clicking through them would make dangerous actions
+        // (install/overwrite) feel accidental.
+        if !matches!(self.state.stage, Stage::Browse) || self.state.search_active {
+            return;
+        }
+        match mouse.kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                self.handle_mouse_click(mouse.column, mouse.row);
+            }
+            MouseEventKind::ScrollUp => {
+                self.handle_mouse_scroll(mouse.column, mouse.row, -3);
+            }
+            MouseEventKind::ScrollDown => {
+                self.handle_mouse_scroll(mouse.column, mouse.row, 3);
+            }
+            _ => {}
+        }
+    }
+
+    fn handle_mouse_click(&mut self, column: u16, row: u16) {
+        let repo_list = self.state.repo_list_area;
+        if rect_contains(repo_list, column, row) {
+            self.state.focus = Focus::Repos;
+            if !self.state.loading_repos {
+                let offset = self.state.repo_state.offset();
+                if let Some(index) =
+                    repo_row_at(repo_list, offset, self.state.filtered.len(), column, row)
+                {
+                    self.state.select_repo(index);
+                }
+            }
+            return;
+        }
+        if rect_contains(self.state.repo_panel_area, column, row) {
+            self.state.focus = Focus::Repos;
+            return;
+        }
+        if rect_contains(self.state.detail_panel_area, column, row) {
+            self.state.focus = if self.state.release.is_some() {
+                Focus::Assets
+            } else {
+                Focus::Repos
+            };
+        }
+    }
+
+    fn handle_mouse_scroll(&mut self, column: u16, row: u16, delta: isize) {
+        if rect_contains(self.state.repo_panel_area, column, row) {
+            self.state.focus = Focus::Repos;
+            if !self.state.loading_repos {
+                self.state.move_repo(delta);
+            }
+            return;
+        }
+        if rect_contains(self.state.detail_panel_area, column, row) && self.state.release.is_some()
+        {
+            self.state.focus = Focus::Assets;
+            self.state.move_asset(delta);
+        }
+    }
+
     fn handle_key(&mut self, key: KeyEvent) {
         if key.modifiers.contains(KeyModifiers::CONTROL)
             && matches!(key.code, KeyCode::Char('c') | KeyCode::Char('C'))
@@ -1658,6 +1769,25 @@ impl App {
     }
 }
 
+fn rect_contains(rect: Rect, column: u16, row: u16) -> bool {
+    !rect.is_empty()
+        && column >= rect.x
+        && column < rect.right()
+        && row >= rect.y
+        && row < rect.bottom()
+}
+
+/// Map a terminal cell to the filtered repository index shown there. The
+/// caller supplies `ListState::offset()` so a scrolled list selects the row
+/// the user actually sees rather than the row at the top of the data set.
+fn repo_row_at(area: Rect, offset: usize, len: usize, column: u16, row: u16) -> Option<usize> {
+    if !rect_contains(area, column, row) {
+        return None;
+    }
+    let index = offset.saturating_add(usize::from(row - area.y));
+    (index < len).then_some(index)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1667,5 +1797,24 @@ mod tests {
         // The terminal helper is exercised manually; this test documents that
         // unit tests never enter raw mode.
         assert_eq!(Focus::Repos, Focus::Repos);
+    }
+
+    #[test]
+    fn mouse_rows_map_to_the_visible_filtered_index() {
+        let area = Rect::new(10, 5, 20, 4);
+        assert_eq!(repo_row_at(area, 0, 10, 10, 5), Some(0));
+        assert_eq!(repo_row_at(area, 0, 10, 29, 8), Some(3));
+        assert_eq!(repo_row_at(area, 2, 10, 10, 5), Some(2));
+        assert_eq!(repo_row_at(area, 0, 10, 10, 9), None);
+        assert_eq!(repo_row_at(area, 0, 10, 9, 5), None);
+        assert_eq!(repo_row_at(area, 0, 10, 30, 5), None);
+        assert_eq!(repo_row_at(area, 0, 2, 10, 7), None);
+    }
+
+    #[test]
+    fn mouse_hit_testing_rejects_empty_rectangles() {
+        let empty = Rect::new(10, 5, 0, 4);
+        assert!(!rect_contains(empty, 10, 5));
+        assert_eq!(repo_row_at(empty, 0, 10, 10, 5), None);
     }
 }

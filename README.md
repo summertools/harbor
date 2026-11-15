@@ -28,7 +28,7 @@ the scriptable CLI.
 │  ● summertools/rtop      org:summertools  ○               ││checksum SHA-256 published  1021 KiB      │
 │                                                            ││assets · 1 compatible · 3 other           │
 ╰────────────────────────────────────────────────────────────╯╰─────────────────────────────────────────╯
- ↑↓ move  Enter release  i install  Tab assets  / search  v status  f source  s sources  r refresh  ? help  q quit
+ click/↑↓ select  Enter open  i install  Tab assets  / search  v status  f source  s sources  r refresh  ? help  q quit
 ```
 
 ## Features
@@ -48,34 +48,77 @@ the scriptable CLI.
   `○ not installed`. The header summarises installed, update, and not-installed
   counts. Unmanaged files require `--force` or the explicit overwrite toggle.
 - **Polished ratatui interface** with search, source filters, asset selection,
-  live progress, confirmations, and a source manager.
+  live progress, confirmations, a source manager, and mouse selection with
+  wheel scrolling.
 - **Opt-in automatic updates** for managed installs, with strict SemVer,
   platform compatibility, and mandatory SHA-256 checks. Disabled by default;
   available in the TUI and as `harbor autoupdate` for schedulers.
 - **Scriptable CLI** with JSON output, dry runs, explicit tags, asset globs,
   archive-internal binary selection, and non-interactive `--yes`.
-- **No shell execution**, no automatic `sudo`, no automatic PATH edits, and no
-  background services.
+- **No shell execution in Harbor.** The installed binary does not call `sh`,
+  `sudo`, `curl`, or any installed program. The standalone installer is a
+  separately reviewed download that only verifies and copies the binary.
+- No automatic `sudo`, no automatic PATH edits, and no background services.
 - Bounded API responses and downloads, sanitised terminal text, and GitHub-host
   allowlisting.
 
 ## Installation
 
-From this repository:
+### Prebuilt binary (Linux and macOS)
+
+The installer resolves a release, downloads the matching archive and its
+published SHA-256 file, verifies the digest, and atomically installs only the
+`harbor` executable. It never uses `sudo` or edits shell startup files.
 
 ```bash
-cargo install --path .
+curl -fsSLO https://github.com/summertools/harbor/releases/latest/download/install.sh
+less install.sh
+sh install.sh
 ```
 
-The binary is named `harbor`. Rust 1.88 or newer is required.
+Pin a release or choose the destination:
 
-Prebuilt archives for Linux (x86_64 and aarch64), macOS (Intel and Apple
-silicon), and Windows (x86_64) are attached to each
-[release](https://github.com/summertools/harbor/releases), together with
-SHA-256 checksum files. Verify the checksum before extracting. The Linux
-archives are static musl builds and run on both glibc and musl systems; Harbor
-reports the host C library for asset compatibility, so a musl build on a glibc
-host still accepts glibc-linked releases.
+```bash
+sh install.sh v0.2.0
+HARBOR_BIN_DIR="$HOME/bin" sh install.sh
+```
+
+Avoid piping an unreviewed script directly into a shell. Windows users can
+download the `.zip` asset from the
+[release page](https://github.com/summertools/harbor/releases) and place
+`harbor.exe` in a directory on `PATH`.
+
+The Linux archives are static musl builds and run on both glibc and musl
+systems; Harbor reports the host C library for asset compatibility, so a musl
+build on a glibc host still accepts glibc-linked releases.
+
+### Cargo
+
+The crates.io package is named **`harbor-bin`** because the name `harbor` is
+already used by an unrelated crate. The installed binary is still `harbor`.
+Rust 1.88 or newer is required.
+
+```bash
+cargo install harbor-bin --locked
+```
+
+If the crates.io release is not available yet, install a tagged source release
+directly from Git:
+
+```bash
+cargo install --git https://github.com/summertools/harbor --tag v0.2.0 --locked
+```
+
+From a local checkout:
+
+```bash
+cargo install --path . --locked
+```
+
+Maintainers publish crates.io releases through the **Publish crate** workflow.
+It requires a repository secret named `CARGO_REGISTRY_TOKEN` and the release
+tag as input; the workflow verifies that the tag matches `Cargo.toml` before
+running `cargo publish --locked`.
 
 ## Quick start
 
@@ -128,6 +171,7 @@ Run `harbor` with no subcommand.
 | `r` | Refresh repositories |
 | `?` | Help |
 | `q` | Quit |
+| Mouse click / wheel | Click a repository to select it, click details to focus assets, or wheel to scroll; Shift+drag selects terminal text |
 
 In the confirmation screen:
 

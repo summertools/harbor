@@ -1,0 +1,47 @@
+name: Publish crate
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to publish, for example v0.2.0"
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    name: Publish harbor-bin
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the release tag
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.tag }}
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Verify the tag matches Cargo.toml
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          version="$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)"
+          test "$TAG" = "v$version" || {
+            echo "tag $TAG does not match Cargo.toml version v$version" >&2
+            exit 1
+          }
+
+      - name: Test the tagged source
+        run: cargo test --locked --all-targets
+
+      - name: Publish
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          if [ -z "${CARGO_REGISTRY_TOKEN:-}" ]; then
+            echo "Set the CARGO_REGISTRY_TOKEN repository secret before publishing." >&2
+            exit 1
+          fi
+          cargo publish --locked

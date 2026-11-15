@@ -26,7 +26,7 @@ CPU 架构的包，校验 SHA-256，在不信任压缩包路径的前提下安�
 │  ● summertools/rtop      org:summertools  ○               ││checksum SHA-256 published  1021 KiB      │
 │                                                            ││assets · 1 compatible · 3 other           │
 ╰────────────────────────────────────────────────────────────╯╰─────────────────────────────────────────╯
- ↑↓ move  Enter release  i install  Tab assets  / search  v status  f source  s sources  r refresh  ? help  q quit
+ click/↑↓ select  Enter open  i install  Tab assets  / search  v status  f source  s sources  r refresh  ? help  q quit
 ```
 
 ## 特性
@@ -42,30 +42,69 @@ CPU 架构的包，校验 SHA-256，在不信任压缩包路径的前提下安�
 - **安装清单与状态总览**：每个仓库行显示 `✓ 已安装 vX`、`↑ 可更新 vX → vY`、
   `! 文件缺失`、`! 无兼容资产` 或 `○ 未安装`；顶部统计已安装、可更新和未安装数量。
   外部文件必须使用 `--force` 或 UI 中的显式覆盖开关。
-- **精致的 ratatui 界面**：搜索、源过滤、资产选择、实时进度、确认页和源管理器。
+- **精致的 ratatui 界面**：搜索、源过滤、资产选择、实时进度、确认页、源管理器，
+  以及鼠标选择和滚轮浏览。
 - **可选自动更新**：只更新受管理安装，严格使用 SemVer、平台兼容资产和强制
   SHA-256 校验；默认关闭，可在 TUI 和 `harbor autoupdate`（适合定时任务）中使用。
 - **可脚本化 CLI**：JSON 输出、dry-run、指定 tag、资产 glob、压缩包内二进制选择、
   非交互 `--yes`。
-- **不执行 shell**、不自动 `sudo`、不自动修改 PATH、不启动后台服务。
+- **harbor 本体不执行 shell**：不会调用 `sh`、`sudo`、`curl` 或已安装的程序。
+  独立安装脚本是单独审阅的下载文件，只负责校验和复制二进制。
+- 不自动 `sudo`、不自动修改 PATH、不启动后台服务。
 - API 响应和下载大小有上限；终端文本会清理 ANSI/双向控制字符；下载 URL 只允许
   GitHub 主机。
 
 ## 安装
 
-在当前仓库中：
+### 预编译二进制（Linux 和 macOS）
+
+安装脚本会解析 Release、下载对应压缩包和 SHA-256 文件、验证摘要，再以原子方式
+只安装 `harbor` 可执行文件。脚本不会使用 `sudo`，也不会修改 shell 启动文件。
 
 ```bash
-cargo install --path .
+curl -fsSLO https://github.com/summertools/harbor/releases/latest/download/install.sh
+less install.sh
+sh install.sh
 ```
 
-要求 Rust 1.88 或更高版本。生成的可执行文件名为 `harbor`。
+指定版本或安装目录：
 
-每个 [Release](https://github.com/summertools/harbor/releases) 还提供 Linux
-（x86_64、aarch64）、macOS（Intel、Apple 芯片）和 Windows（x86_64）预编译包，
-并附带 SHA-256 校验文件；解压前请先校验。Linux 预编译包是静态 musl 构建，
-可在 glibc 和 musl 系统上运行；harbor 按宿主机 C 库判断资产兼容性，因此在
-glibc 系统上使用 musl 构建仍可识别 glibc 资产。
+```bash
+sh install.sh v0.2.0
+HARBOR_BIN_DIR="$HOME/bin" sh install.sh
+```
+
+请避免把未经检查的脚本直接通过管道交给 shell。Windows 用户可以从
+[Release 页面](https://github.com/summertools/harbor/releases) 下载 `.zip`，
+将 `harbor.exe` 放到 `PATH` 中的目录。
+
+Linux 预编译包是静态 musl 构建，可在 glibc 和 musl 系统上运行；harbor 按
+宿主机 C 库判断资产兼容性，因此在 glibc 系统上使用 musl 构建仍可识别 glibc 资产。
+
+### Cargo
+
+crates.io 包名为 **`harbor-bin`**，因为 `harbor` 已被另一个无关项目占用；安装后的
+可执行文件仍然是 `harbor`。要求 Rust 1.88 或更高版本。
+
+```bash
+cargo install harbor-bin --locked
+```
+
+如果 crates.io 版本尚未发布，可以直接安装带标签的 Git 源码：
+
+```bash
+cargo install --git https://github.com/summertools/harbor --tag v0.2.0 --locked
+```
+
+在当前仓库中安装：
+
+```bash
+cargo install --path . --locked
+```
+
+维护者通过 **Publish crate** workflow 发布 crates.io 版本。需要在仓库中配置名为
+`CARGO_REGISTRY_TOKEN` 的 secret，并以发布 tag 作为输入；workflow 会先确认 tag 与
+`Cargo.toml` 版本一致，再执行 `cargo publish --locked`。
 
 ## 快速开始
 
@@ -118,6 +157,7 @@ harbor install rtop --dry-run
 | `r` | 刷新仓库 |
 | `?` | 帮助 |
 | `q` | 退出 |
+| 鼠标点击 / 滚轮 | 点击仓库进行选择，点击详情聚焦资产，滚轮浏览列表；Shift+拖拽选择终端文本 |
 
 确认页：
 

@@ -25,6 +25,21 @@ jobs:
           title: harbor $tag
           branch: main
 
+  upload-installer:
+    name: Upload installer script
+    needs: create-release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Check out
+        uses: actions/checkout@v6
+
+      - name: Upload install.sh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${GITHUB_REF_NAME}" install.sh --repo "${GITHUB_REPOSITORY}" --clobber
+
   upload-assets:
     name: Build ${{ matrix.target }}
     needs: create-release

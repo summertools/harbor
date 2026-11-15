@@ -26,6 +26,19 @@ jobs:
       - name: Test
         run: cargo test --locked --all-targets
 
+  package:
+    name: Cargo package
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out
+        uses: actions/checkout@v6
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Verify crates.io package
+        run: cargo publish --dry-run --locked
+
   lint:
     name: Format and Clippy
     runs-on: ubuntu-latest

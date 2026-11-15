@@ -6,6 +6,25 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-15
+
+### Added
+
+- Mouse support in the interactive repository browser: click a repository row
+  to select and focus it, click the details pane to focus assets, and use the
+  wheel to scroll repositories or assets. Keyboard navigation continues to
+  work unchanged.
+- Pointer-motion events are drained in bounded batches so a moving mouse cannot
+  starve rendering or input processing.
+- The help screen and footer document mouse selection, wheel scrolling, and
+  Shift+drag terminal text selection.
+- `install.sh` for Linux and macOS: resolves a release, downloads the matching
+  archive and SHA-256 file, verifies the digest, rejects unsafe archive paths,
+  and atomically installs one regular executable without sudo.
+- Cargo packaging as `harbor-bin` (the installed binary remains `harbor`) and a
+  manual crates.io publish workflow. Tagged source installs work with
+  `cargo install --git ... --tag ... --locked`.
+
 ## [0.1.3] - 2026-11-15
 
 ### Fixed
@@ -86,7 +105,8 @@ All notable changes to this project are documented here. The format follows
 - Prefetching latest metadata for installed repositories no longer races with
   the selected-repository request or clears the wrong loading state.
 
-[Unreleased]: https://github.com/summertools/harbor/compare/v0.1.3...HEAD
+[Unreleased]: https://github.com/summertools/harbor/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/summertools/harbor/releases/tag/v0.2.0
 [0.1.3]: https://github.com/summertools/harbor/releases/tag/v0.1.3
 [0.1.2]: https://github.com/summertools/harbor/releases/tag/v0.1.2
 [0.1.1]: https://github.com/summertools/harbor/releases/tag/v0.1.1
