@@ -684,7 +684,6 @@ fn draw_detail_panel(frame: &mut Frame, state: &mut UiState, area: Rect, theme: 
         release,
         description.as_deref(),
         &bin_dir,
-        platform,
         theme,
     ));
     let inner = block.inner(area);
@@ -705,7 +704,6 @@ fn release_summary(
     release: &ReleaseView,
     description: Option<&str>,
     bin_dir: &crate::platform::BinDir,
-    platform: crate::platform::Platform,
     theme: Theme,
 ) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
@@ -758,16 +756,17 @@ fn release_summary(
             ),
         ]));
     } else {
+        // Keep this summary inside a narrow details pane. The full platform
+        // and per-asset reasons are shown below, so an unlabeled clipped count
+        // is never useful.
+        let summary = if release.others.is_empty() {
+            "no compatible asset".to_owned()
+        } else {
+            format!("0 compatible · {} other-platform", release.others.len())
+        };
         lines.push(Line::from(vec![
             Span::styled("assets   ", theme.dim()),
-            Span::styled(
-                format!("no compatible asset for {}", platform.label()),
-                theme.warn(),
-            ),
-            Span::styled(
-                format!("   {} other-platform asset(s)", release.others.len()),
-                theme.dim(),
-            ),
+            Span::styled(summary, theme.warn()),
         ]));
     }
     lines.push(Line::from(vec![
@@ -1680,6 +1679,7 @@ mod tests {
         state.release_error = None;
         let text = render(&mut state, 120, 36);
         assert!(text.contains("No compatible asset"), "{text}");
+        assert!(text.contains("0 compatible · 1 other-platform"), "{text}");
         assert!(text.contains("different operating"), "{text}");
         assert!(!text.contains("release unavailable"), "{text}");
     }

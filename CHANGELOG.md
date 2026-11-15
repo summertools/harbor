@@ -6,6 +6,15 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-11-15
+
+### Fixed
+
+- The release-details summary for an incompatible release no longer clips an
+  unlabeled asset count in narrow panes. It now shows a compact
+  `0 compatible · N other-platform` summary, while the full platform and
+  per-asset reasons remain below.
+
 ## [0.1.2] - 2026-11-15
 
 ### Fixed
@@ -77,7 +86,8 @@ All notable changes to this project are documented here. The format follows
 - Prefetching latest metadata for installed repositories no longer races with
   the selected-repository request or clears the wrong loading state.
 
-[Unreleased]: https://github.com/summertools/harbor/compare/v0.1.2...HEAD
+[Unreleased]: https://github.com/summertools/harbor/compare/v0.1.3...HEAD
+[0.1.3]: https://github.com/summertools/harbor/releases/tag/v0.1.3
 [0.1.2]: https://github.com/summertools/harbor/releases/tag/v0.1.2
 [0.1.1]: https://github.com/summertools/harbor/releases/tag/v0.1.1
 [0.1.0]: https://github.com/summertools/harbor/releases/tag/v0.1.0
